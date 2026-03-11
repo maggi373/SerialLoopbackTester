@@ -1,6 +1,6 @@
 # Serial Loopback Tester
 Version: `1.0.0`  
-Made by: `PoldenTEK`
+Made by: `maggi373`
 
 Python GUI tool for:
 - 40 RS232 loopback tests (same port send/receive)
