@@ -38,10 +38,15 @@ if ($SkipInno) {
 
 $iscc = (Get-Command ISCC.exe -ErrorAction SilentlyContinue).Source
 if (-not $iscc) {
+    $localAppDataInno = $null
+    if ($env:LOCALAPPDATA) {
+        $localAppDataInno = Join-Path $env:LOCALAPPDATA "Programs\\Inno Setup 6\\ISCC.exe"
+    }
     $candidates = @(
+        $localAppDataInno,
         "C:\\Program Files (x86)\\Inno Setup 6\\ISCC.exe",
         "C:\\Program Files\\Inno Setup 6\\ISCC.exe"
-    )
+    ) | Where-Object { $_ }
     foreach ($candidate in $candidates) {
         if (Test-Path $candidate) {
             $iscc = $candidate

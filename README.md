@@ -50,6 +50,7 @@ Build EXE + Setup installer (requires Inno Setup 6):
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\build_installer.ps1
 ```
+The build script checks `ISCC.exe` in `PATH`, `%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe`, and standard Program Files locations.
 
 Outputs:
 - Portable EXE: `dist\SerialLoopbackTester.exe`
