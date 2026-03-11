@@ -27,7 +27,8 @@ $oneDirExePath = Join-Path $PSScriptRoot ("dist\\{0}\\{0}.exe" -f $portableBaseN
 if (Test-Path $oneFileExePath) {
     $exePath = $oneFileExePath
 } elseif (Test-Path $oneDirExePath) {
-    $exePath = $oneDirExePath
+    Copy-Item -Path $oneDirExePath -Destination $oneFileExePath -Force
+    $exePath = $oneFileExePath
 } else {
     throw "Build failed: EXE was not created in dist\\ (expected $oneFileExePath or $oneDirExePath)"
 }

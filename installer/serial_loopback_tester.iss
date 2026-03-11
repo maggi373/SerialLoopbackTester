@@ -10,7 +10,7 @@
 #ifndef MyAppExeBaseName
 #define MyAppExeBaseName "SerialLoopbackTester-portable"
 #endif
-#define MyAppExeName "{#MyAppExeBaseName}.exe"
+#define MyAppExeName MyAppExeBaseName + ".exe"
 #ifndef MyOutputBaseFilename
 #define MyOutputBaseFilename "SerialLoopbackTester-installer"
 #endif
@@ -38,11 +38,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional icons:"; Flags: unchecked
 
 [Files]
-#ifexist "..\dist\{#MyAppExeName}"
 Source: "..\dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
-#else
-Source: "..\dist\{#MyAppExeBaseName}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-#endif
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
