@@ -5,6 +5,9 @@ param(
 $ErrorActionPreference = "Stop"
 Set-Location -Path $PSScriptRoot
 
+$portableBaseName = "SerialLoopbackTester-portable"
+$installerBaseName = "SerialLoopbackTester-installer"
+
 Write-Host "Installing Python dependencies..."
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt -r requirements-build.txt
@@ -15,11 +18,11 @@ python -m PyInstaller `
     --clean `
     --onefile `
     --windowed `
-    --name SerialLoopbackTester `
+    --name $portableBaseName `
     serial_tester_gui.py
 
-$oneFileExePath = Join-Path $PSScriptRoot "dist\\SerialLoopbackTester.exe"
-$oneDirExePath = Join-Path $PSScriptRoot "dist\\SerialLoopbackTester\\SerialLoopbackTester.exe"
+$oneFileExePath = Join-Path $PSScriptRoot ("dist\\{0}.exe" -f $portableBaseName)
+$oneDirExePath = Join-Path $PSScriptRoot ("dist\\{0}\\{0}.exe" -f $portableBaseName)
 
 if (Test-Path $oneFileExePath) {
     $exePath = $oneFileExePath
@@ -62,6 +65,6 @@ if (-not $iscc) {
 }
 
 Write-Host "Building Setup installer with Inno Setup..."
-& $iscc "installer\\serial_loopback_tester.iss"
+& $iscc "/DMyAppExeBaseName=$portableBaseName" "/DMyOutputBaseFilename=$installerBaseName" "installer\\serial_loopback_tester.iss"
 
 Write-Host "Installer build complete. Check dist\\installer."

@@ -1,7 +1,19 @@
+#ifndef MyAppName
 #define MyAppName "Serial Loopback Tester"
+#endif
+#ifndef MyAppVersion
 #define MyAppVersion "1.0.0"
+#endif
+#ifndef MyAppPublisher
 #define MyAppPublisher "PoldenTEK"
-#define MyAppExeName "SerialLoopbackTester.exe"
+#endif
+#ifndef MyAppExeBaseName
+#define MyAppExeBaseName "SerialLoopbackTester-portable"
+#endif
+#define MyAppExeName "{#MyAppExeBaseName}.exe"
+#ifndef MyOutputBaseFilename
+#define MyOutputBaseFilename "SerialLoopbackTester-installer"
+#endif
 
 [Setup]
 AppId={{F85F50B8-B490-49AF-84D8-198A8D8D478A}}
@@ -11,7 +23,7 @@ AppPublisher={#MyAppPublisher}
 DefaultDirName={autopf}\Serial Loopback Tester
 DefaultGroupName=Serial Loopback Tester
 OutputDir=..\dist\installer
-OutputBaseFilename=SerialLoopbackTesterSetup
+OutputBaseFilename={#MyOutputBaseFilename}
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
@@ -29,7 +41,7 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 #ifexist "..\dist\{#MyAppExeName}"
 Source: "..\dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 #else
-Source: "..\dist\SerialLoopbackTester\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\dist\{#MyAppExeBaseName}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 #endif
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 
