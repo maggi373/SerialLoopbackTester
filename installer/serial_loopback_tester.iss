@@ -36,6 +36,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional icons:"; Flags: unchecked
+Name: "startup"; Description: "Start Serial Loopback Tester when Windows starts"; GroupDescription: "Autostart:"; Flags: unchecked
 
 [Files]
 Source: "..\dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
@@ -44,6 +45,7 @@ Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 [Icons]
 Name: "{autoprograms}\Serial Loopback Tester"; Filename: "{app}\{#MyAppExeName}"
 Name: "{autodesktop}\Serial Loopback Tester"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+Name: "{userstartup}\Serial Loopback Tester"; Filename: "{app}\{#MyAppExeName}"; Tasks: startup
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch Serial Loopback Tester"; Flags: nowait postinstall skipifsilent
