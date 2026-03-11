@@ -19,7 +19,7 @@ except ImportError as exc:  # pragma: no cover
     raise SystemExit("Missing dependency: pyserial. Install with `pip install pyserial`.") from exc
 
 DEFAULT_RS232_COUNT = 40
-DEFAULT_RS485_PAIR_COUNT = 4
+DEFAULT_RS485_PAIR_COUNT = 8
 DEFAULT_PRESET_COUNT = 5
 FAILURE_WINDOW_SECONDS = 3600
 FAILURE_WINDOW_LABEL = "1h"
@@ -591,7 +591,7 @@ class RS485PairWorker(threading.Thread):
 class SerialTesterApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title(f"Serial Loopback Tester v{APP_VERSION} (40x RS232 + 4x RS485 Pairs)")
+        self.title(f"Serial Loopback Tester v{APP_VERSION} (40x RS232 + 8x RS485 Pairs)")
         self.geometry("1500x900")
         self.minsize(1200, 720)
 
@@ -1789,7 +1789,7 @@ class SerialTesterApp(tk.Tk):
         parent.columnconfigure(1, weight=2)
         parent.rowconfigure(1, weight=1)
 
-        ttk.Label(parent, text="RS485 Pair Settings (4 pairs)").grid(row=0, column=0, sticky="w", pady=(0, 6))
+        ttk.Label(parent, text="RS485 Pair Settings (8 pairs)").grid(row=0, column=0, sticky="w", pady=(0, 6))
 
         table_wrap = ttk.Frame(parent)
         table_wrap.grid(row=1, column=0, sticky="nsew", padx=(0, 8))

@@ -4,7 +4,7 @@ Made by: `PoldenTEK`
 
 Python GUI tool for:
 - 40 RS232 loopback tests (same port send/receive)
-- 4 RS485 pair tests (sender -> receiver -> echo back -> sender verify)
+- 8 RS485 pair tests (sender -> receiver -> echo back -> sender verify)
 - Combined Overview page for all ports/pairs with color status bars
 - Overview supports compact 2-column row mode and 2-column card mode
 - Health summary block in Overview (alarm, counts, and recent failures)
@@ -92,7 +92,7 @@ Outputs:
 ## Settings file
 - Script mode path: `serial_tester_settings.json` next to `serial_tester_gui.py`.
 - Installed EXE path: `%APPDATA%\SerialLoopbackTester\serial_tester_settings.json`.
-- The file is auto-created with 40 RS232 entries and 4 RS485 pair entries on first run.
+- The file is auto-created with 40 RS232 entries and 8 RS485 pair entries on first run.
 - Settings are validated and normalized when loaded.
 - Fullscreen default lives in `ui.start_fullscreen`.
 - Auto-start-after-launch default lives in `ui.auto_start_after_launch_2s`.
