@@ -5,8 +5,9 @@ param(
 $ErrorActionPreference = "Stop"
 Set-Location -Path $PSScriptRoot
 
-$portableBaseName = "SerialLoopbackTester-portable"
-$installerBaseName = "SerialLoopbackTester-installer"
+$appVersion = "1.0.0"
+$portableBaseName = "SerialLoopbackTester-v$appVersion-portable"
+$installerBaseName = "SerialLoopbackTester-v$appVersion-installer"
 
 Write-Host "Installing Python dependencies..."
 python -m pip install --upgrade pip
@@ -66,6 +67,6 @@ if (-not $iscc) {
 }
 
 Write-Host "Building Setup installer with Inno Setup..."
-& $iscc "/DMyAppExeBaseName=$portableBaseName" "/DMyOutputBaseFilename=$installerBaseName" "installer\\serial_loopback_tester.iss"
+& $iscc "/DMyAppVersion=$appVersion" "/DMyAppExeBaseName=$portableBaseName" "/DMyOutputBaseFilename=$installerBaseName" "installer\\serial_loopback_tester.iss"
 
 Write-Host "Installer build complete. Check dist\\installer."

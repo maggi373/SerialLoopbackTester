@@ -8,11 +8,11 @@
 #define MyAppPublisher "PoldenTEK"
 #endif
 #ifndef MyAppExeBaseName
-#define MyAppExeBaseName "SerialLoopbackTester-portable"
+#define MyAppExeBaseName "SerialLoopbackTester-v" + MyAppVersion + "-portable"
 #endif
 #define MyAppExeName MyAppExeBaseName + ".exe"
 #ifndef MyOutputBaseFilename
-#define MyOutputBaseFilename "SerialLoopbackTester-installer"
+#define MyOutputBaseFilename "SerialLoopbackTester-v" + MyAppVersion + "-installer"
 #endif
 
 [Setup]
