@@ -22,6 +22,8 @@ Python GUI tool for:
 - Optional startup setting: launch in fullscreen by default
 - Optional startup setting (default ON): delay communications by 2 seconds
 
+![solder.py](https://files.thorfusion.com/images/serial.jpg)
+
 ## Requirements
 - Python 3.10+
 - `pyserial`
