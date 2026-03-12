@@ -1,10 +1,11 @@
 # Serial Loopback Tester
-Version: `1.0.0`  
+Version: `1.1.0`  
 Made by: `maggi373`
 
 Python GUI tool for:
 - 40 RS232 loopback tests (same port send/receive)
 - 8 RS485 pair tests (sender -> receiver -> echo back -> sender verify)
+- Customizable RS232 and RS485 pair counts from Settings (defaults: 40 and 8) (MAX: 256 and 128)
 - Combined Overview page for all ports/pairs with color status bars
 - Overview supports compact 2-column row mode and 2-column card mode
 - Health summary block in Overview (alarm, counts, and recent failures)
@@ -54,8 +55,8 @@ The build script checks `ISCC.exe` in `PATH`, `%LOCALAPPDATA%\Programs\Inno Setu
 Installer includes an optional checkbox to start the app with Windows (Startup folder shortcut for the installing user).
 
 Outputs:
-- Portable EXE: `dist\SerialLoopbackTester-v1.0.0-portable.exe`
-- Installer: `dist\installer\SerialLoopbackTester-v1.0.0-installer.exe`
+- Portable EXE: `dist\SerialLoopbackTester-v1.1.0-portable.exe`
+- Installer: `dist\installer\SerialLoopbackTester-v1.1.0-installer.exe`
 
 ## Usage
 1. Open the **Settings** tab.
@@ -80,25 +81,28 @@ Outputs:
 11. In **Settings > Application**, enable **Start application in fullscreen** if desired.
 12. In **Settings > Application**, keep **Delay communications startup by 2 seconds** enabled (default ON) to wait before first TX when starting tests manually.
 13. In **Settings > Application**, use **Enable All Ports** or **Disable All Ports** for a global channel state change.
-14. To disable a port completely, either uncheck **Enabled** or leave the port field blank. Blank ports are skipped.
-15. In **Edit Selected RS232 Port**, use **Apply To All RS232 (Keep Name/Port)** to copy serial settings to all RS232 rows while preserving each row's Name and Port.
-16. In **Edit Selected RS485 Pair**, use **Apply To All RS485 (Keep Name/Ports)** to copy serial settings to all RS485 pairs while preserving each pair's Name, Sender Port, and Echo Port.
-17. In **Presets**, set up each preset name and pick COM ports for that preset.
+14. In **Settings > Application**, set **RS232 count** and **RS485 pair count**, then click **Apply Counts** to resize channels (defaults are 40 and 8).
+15. To disable a port completely, either uncheck **Enabled** or leave the port field blank. Blank ports are skipped.
+16. In **Edit Selected RS232 Port**, use **Apply To All RS232 (Keep Name/Port)** to copy serial settings to all RS232 rows while preserving each row's Name and Port.
+17. In **Edit Selected RS485 Pair**, use **Apply To All RS485 (Keep Name/Ports)** to copy serial settings to all RS485 pairs while preserving each pair's Name, Sender Port, and Echo Port.
+18. In **Presets**, set up each preset name and pick COM ports for that preset.
    - Each preset card header also shows the custom name for quick identification.
-18. Use the 5 preset buttons to the right of **Fullscreen** to apply presets:
+19. Use the 5 preset buttons to the right of **Fullscreen** to apply presets:
    - Selected COM-matching channels are set to **Enabled**.
    - Non-selected channels are set to **Disabled**.
    - Running channels that become disabled are stopped automatically.
-19. Use **Refresh COM List** to reload dropdown values from system ports; manual values are still allowed (including blank/duplicate/custom values).
+20. Use **Refresh COM List** to reload dropdown values from system ports; manual values are still allowed (including blank/duplicate/custom values).
 
 ## Settings file
-- Script mode path: `serial_tester_settings.json` next to `serial_tester_gui.py`.
-- Installed EXE path: `%APPDATA%\SerialLoopbackTester\serial_tester_settings.json`.
-- The file is auto-created with 40 RS232 entries and 8 RS485 pair entries on first run.
+- Settings path (script + EXE): `%USERPROFILE%\Documents\SerialLoopbackTester\serial_tester_settings.json`.
+- On Windows, the app resolves this using the system **My Documents** known-folder API (works with localized folder names).
+- If no settings file exists there yet, the app does a one-time copy from legacy `%APPDATA%\SerialLoopbackTester\serial_tester_settings.json` (if present).
+- The file is auto-created with default 40 RS232 entries and 8 RS485 pair entries on first run.
 - Settings are validated and normalized when loaded.
 - Fullscreen default lives in `ui.start_fullscreen`.
 - Auto-start-after-launch default lives in `ui.auto_start_after_launch_2s`.
 - 2-second startup delay default lives in `ui.delay_comm_start_2s`.
 - Overview compact mode default lives in `ui.overview_compact_view`.
+- Channel counts live in `ui.rs232_count` and `ui.rs485_pair_count`.
 - Preset names and COM selections live in `ui.presets`.
 - Port names are not forced to be unique/valid, so you can stage configs on systems with fewer COM ports.

@@ -20,10 +20,12 @@ except ImportError as exc:  # pragma: no cover
 
 DEFAULT_RS232_COUNT = 40
 DEFAULT_RS485_PAIR_COUNT = 8
+MAX_RS232_COUNT = 256
+MAX_RS485_PAIR_COUNT = 128
 DEFAULT_PRESET_COUNT = 5
 FAILURE_WINDOW_SECONDS = 3600
 FAILURE_WINDOW_LABEL = "1h"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 APP_PUBLISHER = "PoldenTEK"
 SETTINGS_FILENAME = "serial_tester_settings.json"
 PARITY_OPTIONS = ("N", "E", "O", "M", "S")
@@ -59,6 +61,14 @@ def as_float(value: object, default: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def normalize_count(value: object, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(parsed, maximum))
 
 
 def sanitize_hex_payload(payload: object, default: str) -> str:
@@ -275,6 +285,8 @@ def default_ui_settings() -> dict:
         "auto_start_after_launch_2s": True,
         "delay_comm_start_2s": True,
         "overview_compact_view": True,
+        "rs232_count": DEFAULT_RS232_COUNT,
+        "rs485_pair_count": DEFAULT_RS485_PAIR_COUNT,
         "presets": [default_preset_item(i) for i in range(DEFAULT_PRESET_COUNT)],
     }
 
@@ -315,6 +327,18 @@ def normalize_ui_settings(item: object) -> dict:
             source.get("overview_compact_view", base["overview_compact_view"]),
             base["overview_compact_view"],
         ),
+        "rs232_count": normalize_count(
+            source.get("rs232_count", base["rs232_count"]),
+            base["rs232_count"],
+            0,
+            MAX_RS232_COUNT,
+        ),
+        "rs485_pair_count": normalize_count(
+            source.get("rs485_pair_count", base["rs485_pair_count"]),
+            base["rs485_pair_count"],
+            0,
+            MAX_RS485_PAIR_COUNT,
+        ),
         "presets": presets,
     }
 
@@ -338,9 +362,14 @@ def normalize_settings(raw: object) -> dict:
     if not isinstance(raw_rs485, list):
         raw_rs485 = []
 
-    rs232_ports = [normalize_rs232(raw_rs232[i] if i < len(raw_rs232) else {}, i) for i in range(DEFAULT_RS232_COUNT)]
-    rs485_pairs = [normalize_rs485(raw_rs485[i] if i < len(raw_rs485) else {}, i) for i in range(DEFAULT_RS485_PAIR_COUNT)]
     ui = normalize_ui_settings(raw_ui)
+    rs232_count = normalize_count(ui.get("rs232_count"), DEFAULT_RS232_COUNT, 0, MAX_RS232_COUNT)
+    rs485_count = normalize_count(ui.get("rs485_pair_count"), DEFAULT_RS485_PAIR_COUNT, 0, MAX_RS485_PAIR_COUNT)
+    ui["rs232_count"] = rs232_count
+    ui["rs485_pair_count"] = rs485_count
+
+    rs232_ports = [normalize_rs232(raw_rs232[i] if i < len(raw_rs232) else {}, i) for i in range(rs232_count)]
+    rs485_pairs = [normalize_rs485(raw_rs485[i] if i < len(raw_rs485) else {}, i) for i in range(rs485_count)]
 
     return {"rs232_ports": rs232_ports, "rs485_pairs": rs485_pairs, "ui": ui}
 
@@ -367,13 +396,42 @@ def save_settings_file(path: Path, settings: dict) -> None:
     path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
 
 
+def resolve_documents_folder() -> Path:
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            CSIDL_PERSONAL = 0x0005  # My Documents
+            SHGFP_TYPE_CURRENT = 0
+            buffer = ctypes.create_unicode_buffer(260)
+            result = ctypes.windll.shell32.SHGetFolderPathW(None, CSIDL_PERSONAL, None, SHGFP_TYPE_CURRENT, buffer)
+            if result == 0 and buffer.value:
+                return Path(buffer.value)
+        except Exception:
+            pass
+
+    docs_fallback = Path.home() / "Documents"
+    if docs_fallback.exists():
+        return docs_fallback
+    return Path.home()
+
+
 def resolve_settings_path() -> Path:
-    if getattr(sys, "frozen", False):
-        base = Path(os.environ.get("APPDATA", str(Path.home()))) / APP_FOLDER_NAME
-    else:
-        base = Path(__file__).resolve().parent
+    base = resolve_documents_folder() / APP_FOLDER_NAME
     base.mkdir(parents=True, exist_ok=True)
-    return base / SETTINGS_FILENAME
+    settings_path = base / SETTINGS_FILENAME
+
+    if not settings_path.exists():
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            legacy_path = Path(appdata) / APP_FOLDER_NAME / SETTINGS_FILENAME
+            if legacy_path.exists():
+                try:
+                    settings_path.write_text(legacy_path.read_text(encoding="utf-8"), encoding="utf-8")
+                except OSError:
+                    pass
+
+    return settings_path
 
 
 def read_exact(port: serial.Serial, length: int, timeout_s: float, stop_event: threading.Event) -> bytes:
@@ -591,7 +649,7 @@ class RS485PairWorker(threading.Thread):
 class SerialTesterApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title(f"Serial Loopback Tester v{APP_VERSION} (40x RS232 + 8x RS485 Pairs)")
+        self.title("Serial Loopback Tester")
         self.geometry("1500x900")
         self.minsize(1200, 720)
 
@@ -603,9 +661,11 @@ class SerialTesterApp(tk.Tk):
         self.ui_settings = self.settings["ui"]
         self.preset_configs = self.ui_settings["presets"]
 
-        self.rs232_state = [self.new_state() for _ in range(DEFAULT_RS232_COUNT)]
-        self.rs485_state = [self.new_state() for _ in range(DEFAULT_RS485_PAIR_COUNT)]
+        self.rs232_state = [self.new_state() for _ in self.rs232_configs]
+        self.rs485_state = [self.new_state() for _ in self.rs485_configs]
         self.overview_compact_var = tk.BooleanVar(value=bool(self.ui_settings.get("overview_compact_view", True)))
+        self.rs232_count_var = tk.StringVar(value=str(len(self.rs232_configs)))
+        self.rs485_count_var = tk.StringVar(value=str(len(self.rs485_configs)))
 
         self.event_queue: queue.Queue = queue.Queue()
         self.rs232_workers: dict[int, RS232Worker] = {}
@@ -641,6 +701,7 @@ class SerialTesterApp(tk.Tk):
         self.overview_alarm_rect: int | None = None
         self.health_issue_tree: ttk.Treeview | None = None
 
+        self._refresh_window_title()
         self._build_ui()
         self.refresh_com_port_options(show_message=False)
         self._populate_tables()
@@ -666,6 +727,11 @@ class SerialTesterApp(tk.Tk):
         hours, remainder = divmod(seconds, 3600)
         minutes, secs = divmod(remainder, 60)
         return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+    def _refresh_window_title(self) -> None:
+        self.title(
+            f"Serial Loopback Tester v{APP_VERSION} ({len(self.rs232_configs)}x RS232 + {len(self.rs485_configs)}x RS485 Pairs)"
+        )
 
     def _build_ui(self) -> None:
         self.columnconfigure(0, weight=1)
@@ -980,7 +1046,7 @@ class SerialTesterApp(tk.Tk):
         disabled_count = 0
         stopped = 0
 
-        for rs232_idx in range(DEFAULT_RS232_COUNT):
+        for rs232_idx in range(len(self.rs232_configs)):
             cfg = self.rs232_configs[rs232_idx]
             should_enable = self._rs232_in_port_set(rs232_idx, selected_ports)
             cfg["enabled"] = should_enable
@@ -994,7 +1060,7 @@ class SerialTesterApp(tk.Tk):
             else:
                 self.refresh_rs232_row(rs232_idx)
 
-        for rs485_idx in range(DEFAULT_RS485_PAIR_COUNT):
+        for rs485_idx in range(len(self.rs485_configs)):
             cfg = self.rs485_configs[rs485_idx]
             should_enable = self._rs485_in_port_set(rs485_idx, selected_ports)
             cfg["enabled"] = should_enable
@@ -1122,9 +1188,9 @@ class SerialTesterApp(tk.Tk):
         self.fault_tree.delete(*self.fault_tree.get_children())
         self.channel_fault_history.clear()
         self._refresh_health_panel()
-        for idx in range(DEFAULT_RS232_COUNT):
+        for idx in range(len(self.rs232_configs)):
             self._refresh_overview_row("rs232", idx)
-        for idx in range(DEFAULT_RS485_PAIR_COUNT):
+        for idx in range(len(self.rs485_configs)):
             self._refresh_overview_row("rs485", idx)
         self.append_log("Fault review list cleared.")
 
@@ -1363,7 +1429,7 @@ class SerialTesterApp(tk.Tk):
         self.overview_rows.clear()
 
         overview_idx = 0
-        for idx in range(DEFAULT_RS232_COUNT):
+        for idx in range(len(self.rs232_configs)):
             add_row = self._add_overview_compact_row if self.overview_compact_var.get() else self._add_overview_row
             add_row(
                 self.overview_rows_frame,
@@ -1377,7 +1443,7 @@ class SerialTesterApp(tk.Tk):
             )
             overview_idx += 1
 
-        for idx in range(DEFAULT_RS485_PAIR_COUNT):
+        for idx in range(len(self.rs485_configs)):
             cfg = self.rs485_configs[idx]
             add_row = self._add_overview_compact_row if self.overview_compact_var.get() else self._add_overview_row
             add_row(
@@ -1392,9 +1458,9 @@ class SerialTesterApp(tk.Tk):
             )
             overview_idx += 1
 
-        for idx in range(DEFAULT_RS232_COUNT):
+        for idx in range(len(self.rs232_configs)):
             self._refresh_overview_row("rs232", idx)
-        for idx in range(DEFAULT_RS485_PAIR_COUNT):
+        for idx in range(len(self.rs485_configs)):
             self._refresh_overview_row("rs485", idx)
 
     def _add_overview_compact_row(
@@ -1633,8 +1699,15 @@ class SerialTesterApp(tk.Tk):
             ui_section,
             text="Save settings to keep this as default on next launch.",
         ).grid(row=3, column=0, sticky="w", pady=(4, 0))
+        count_row = ttk.Frame(ui_section)
+        count_row.grid(row=4, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(count_row, text="RS232 count").pack(side=tk.LEFT)
+        ttk.Entry(count_row, textvariable=self.rs232_count_var, width=6).pack(side=tk.LEFT, padx=(6, 14))
+        ttk.Label(count_row, text="RS485 pair count").pack(side=tk.LEFT)
+        ttk.Entry(count_row, textvariable=self.rs485_count_var, width=6).pack(side=tk.LEFT, padx=(6, 10))
+        ttk.Button(count_row, text="Apply Counts", command=self.apply_channel_counts).pack(side=tk.LEFT)
         all_buttons = ttk.Frame(ui_section)
-        all_buttons.grid(row=4, column=0, sticky="w", pady=(8, 0))
+        all_buttons.grid(row=5, column=0, sticky="w", pady=(8, 0))
         ttk.Button(all_buttons, text="Enable All Ports", command=self.enable_all_ports).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(all_buttons, text="Disable All Ports", command=self.disable_all_ports).pack(side=tk.LEFT)
 
@@ -1648,6 +1721,106 @@ class SerialTesterApp(tk.Tk):
 
         self._build_rs232_settings_section(rs232_section)
         self._build_rs485_settings_section(rs485_section)
+        self._refresh_settings_section_titles()
+
+    def _refresh_settings_section_titles(self) -> None:
+        if hasattr(self, "rs232_section_title_var"):
+            self.rs232_section_title_var.set(f"RS232 Port Settings ({len(self.rs232_configs)} ports)")
+        if hasattr(self, "rs485_section_title_var"):
+            self.rs485_section_title_var.set(f"RS485 Pair Settings ({len(self.rs485_configs)} pairs)")
+
+    def _apply_resized_channels(self, new_rs232_count: int, new_rs485_count: int) -> None:
+        old_rs232_count = len(self.rs232_configs)
+        old_rs485_count = len(self.rs485_configs)
+
+        if new_rs232_count < old_rs232_count:
+            for idx in sorted([i for i in self.rs232_workers if i >= new_rs232_count], reverse=True):
+                self.stop_single_test("rs232", idx, log_event=False)
+        if new_rs485_count < old_rs485_count:
+            for idx in sorted([i for i in self.rs485_workers if i >= new_rs485_count], reverse=True):
+                self.stop_single_test("rs485", idx, log_event=False)
+
+        if new_rs232_count > old_rs232_count:
+            for idx in range(old_rs232_count, new_rs232_count):
+                self.rs232_configs.append(default_rs232_item(idx))
+                self.rs232_state.append(self.new_state())
+        elif new_rs232_count < old_rs232_count:
+            del self.rs232_configs[new_rs232_count:]
+            del self.rs232_state[new_rs232_count:]
+
+        if new_rs485_count > old_rs485_count:
+            for idx in range(old_rs485_count, new_rs485_count):
+                self.rs485_configs.append(default_rs485_item(idx))
+                self.rs485_state.append(self.new_state())
+        elif new_rs485_count < old_rs485_count:
+            del self.rs485_configs[new_rs485_count:]
+            del self.rs485_state[new_rs485_count:]
+
+        self.channel_fault_history = {
+            (group, idx)
+            for (group, idx) in self.channel_fault_history
+            if not ((group == "rs232" and idx >= new_rs232_count) or (group == "rs485" and idx >= new_rs485_count))
+        }
+
+        self.ui_settings["rs232_count"] = new_rs232_count
+        self.ui_settings["rs485_pair_count"] = new_rs485_count
+        self.rs232_count_var.set(str(new_rs232_count))
+        self.rs485_count_var.set(str(new_rs485_count))
+        self._refresh_window_title()
+        self._refresh_settings_section_titles()
+        self._rebuild_overview_rows()
+        self._populate_tables()
+        self._select_first_rows()
+        self.refresh_com_port_options(show_message=False)
+        self._refresh_health_panel()
+
+    def apply_channel_counts(self) -> None:
+        try:
+            new_rs232_count = int(self.rs232_count_var.get().strip())
+            new_rs485_count = int(self.rs485_count_var.get().strip())
+        except ValueError:
+            messagebox.showerror("Invalid counts", "RS232 and RS485 counts must be whole numbers.")
+            self.rs232_count_var.set(str(len(self.rs232_configs)))
+            self.rs485_count_var.set(str(len(self.rs485_configs)))
+            return
+
+        if not (0 <= new_rs232_count <= MAX_RS232_COUNT):
+            messagebox.showerror("Invalid RS232 count", f"RS232 count must be between 0 and {MAX_RS232_COUNT}.")
+            self.rs232_count_var.set(str(len(self.rs232_configs)))
+            return
+        if not (0 <= new_rs485_count <= MAX_RS485_PAIR_COUNT):
+            messagebox.showerror("Invalid RS485 count", f"RS485 pair count must be between 0 and {MAX_RS485_PAIR_COUNT}.")
+            self.rs485_count_var.set(str(len(self.rs485_configs)))
+            return
+
+        if new_rs232_count == len(self.rs232_configs) and new_rs485_count == len(self.rs485_configs):
+            return
+
+        if self.rs232_workers or self.rs485_workers:
+            answer = messagebox.askyesno(
+                "Stop tests?",
+                "Applying new channel counts will stop running tests. Continue?",
+            )
+            if not answer:
+                self.rs232_count_var.set(str(len(self.rs232_configs)))
+                self.rs485_count_var.set(str(len(self.rs485_configs)))
+                return
+            self.stop_all_tests()
+
+        reduced = new_rs232_count < len(self.rs232_configs) or new_rs485_count < len(self.rs485_configs)
+        if reduced:
+            answer = messagebox.askyesno(
+                "Trim channels?",
+                "Reducing counts will remove channel settings above the new limits. Continue?",
+            )
+            if not answer:
+                self.rs232_count_var.set(str(len(self.rs232_configs)))
+                self.rs485_count_var.set(str(len(self.rs485_configs)))
+                return
+
+        self._apply_resized_channels(new_rs232_count, new_rs485_count)
+        self.save_settings(show_message=False)
+        self.append_log(f"Channel counts updated: RS232={new_rs232_count}, RS485 pairs={new_rs485_count}.")
 
     def _set_all_ports_enabled(self, enabled: bool) -> None:
         action_word = "enable" if enabled else "disable"
@@ -1688,7 +1861,8 @@ class SerialTesterApp(tk.Tk):
         parent.columnconfigure(1, weight=2)
         parent.rowconfigure(1, weight=1)
 
-        ttk.Label(parent, text="RS232 Port Settings (40 ports)").grid(row=0, column=0, sticky="w", pady=(0, 6))
+        self.rs232_section_title_var = tk.StringVar()
+        ttk.Label(parent, textvariable=self.rs232_section_title_var).grid(row=0, column=0, sticky="w", pady=(0, 6))
 
         table_wrap = ttk.Frame(parent)
         table_wrap.grid(row=1, column=0, sticky="nsew", padx=(0, 8))
@@ -1789,7 +1963,8 @@ class SerialTesterApp(tk.Tk):
         parent.columnconfigure(1, weight=2)
         parent.rowconfigure(1, weight=1)
 
-        ttk.Label(parent, text="RS485 Pair Settings (8 pairs)").grid(row=0, column=0, sticky="w", pady=(0, 6))
+        self.rs485_section_title_var = tk.StringVar()
+        ttk.Label(parent, textvariable=self.rs485_section_title_var).grid(row=0, column=0, sticky="w", pady=(0, 6))
 
         table_wrap = ttk.Frame(parent)
         table_wrap.grid(row=1, column=0, sticky="nsew", padx=(0, 8))
@@ -1937,12 +2112,12 @@ class SerialTesterApp(tk.Tk):
         self.rs232_settings_tree.delete(*self.rs232_settings_tree.get_children())
         self.rs485_settings_tree.delete(*self.rs485_settings_tree.get_children())
 
-        for idx in range(DEFAULT_RS232_COUNT):
+        for idx in range(len(self.rs232_configs)):
             self.rs232_tree.insert("", tk.END, iid=f"m232_{idx}")
             self.rs232_settings_tree.insert("", tk.END, iid=f"s232_{idx}")
             self.refresh_rs232_row(idx)
 
-        for idx in range(DEFAULT_RS485_PAIR_COUNT):
+        for idx in range(len(self.rs485_configs)):
             self.rs485_tree.insert("", tk.END, iid=f"m485_{idx}")
             self.rs485_settings_tree.insert("", tk.END, iid=f"s485_{idx}")
             self.refresh_rs485_row(idx)
@@ -2397,7 +2572,7 @@ class SerialTesterApp(tk.Tk):
 
     def start_rs232_tests(self, startup_delay_s: float | None = None) -> None:
         self.stop_rs232_tests()
-        for idx in range(DEFAULT_RS232_COUNT):
+        for idx in range(len(self.rs232_configs)):
             self.start_single_test("rs232", idx, startup_delay_s=startup_delay_s, reset_counts=True, log_event=False)
 
         self.append_log("RS232 test workers started.")
@@ -2413,7 +2588,7 @@ class SerialTesterApp(tk.Tk):
 
     def start_rs485_tests(self, startup_delay_s: float | None = None) -> None:
         self.stop_rs485_tests()
-        for idx in range(DEFAULT_RS485_PAIR_COUNT):
+        for idx in range(len(self.rs485_configs)):
             self.start_single_test("rs485", idx, startup_delay_s=startup_delay_s, reset_counts=True, log_event=False)
 
         self.append_log("RS485 pair workers started.")
@@ -2499,6 +2674,8 @@ class SerialTesterApp(tk.Tk):
         self.ui_settings["auto_start_after_launch_2s"] = bool(self.auto_start_launch_var.get())
         self.ui_settings["delay_comm_start_2s"] = bool(self.delay_comm_start_var.get())
         self.ui_settings["overview_compact_view"] = bool(self.overview_compact_var.get())
+        self.ui_settings["rs232_count"] = len(self.rs232_configs)
+        self.ui_settings["rs485_pair_count"] = len(self.rs485_configs)
         self.ui_settings["presets"] = self.preset_configs
         settings = {
             "rs232_ports": self.rs232_configs,
@@ -2534,6 +2711,10 @@ class SerialTesterApp(tk.Tk):
         self.auto_start_launch_var.set(bool(self.ui_settings.get("auto_start_after_launch_2s", True)))
         self.delay_comm_start_var.set(bool(self.ui_settings.get("delay_comm_start_2s", True)))
         self.overview_compact_var.set(bool(self.ui_settings.get("overview_compact_view", True)))
+        self.rs232_count_var.set(str(len(self.rs232_configs)))
+        self.rs485_count_var.set(str(len(self.rs485_configs)))
+        self._refresh_window_title()
+        self._refresh_settings_section_titles()
         self._rebuild_overview_rows()
         for idx in range(DEFAULT_PRESET_COUNT):
             if idx < len(self.preset_name_vars):
@@ -2542,8 +2723,8 @@ class SerialTesterApp(tk.Tk):
         self._refresh_preset_button_labels()
         self._refresh_preset_port_options(show_message=False)
 
-        self.rs232_state = [self.new_state() for _ in range(DEFAULT_RS232_COUNT)]
-        self.rs485_state = [self.new_state() for _ in range(DEFAULT_RS485_PAIR_COUNT)]
+        self.rs232_state = [self.new_state() for _ in self.rs232_configs]
+        self.rs485_state = [self.new_state() for _ in self.rs485_configs]
         self.failure_counts.clear()
         self.channel_fault_history.clear()
 
