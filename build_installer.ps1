@@ -5,7 +5,7 @@ param(
 $ErrorActionPreference = "Stop"
 Set-Location -Path $PSScriptRoot
 
-$appVersion = "1.1.0"
+$appVersion = "1.1.1"
 $portableBaseName = "SerialLoopbackTester-v$appVersion-portable"
 $installerBaseName = "SerialLoopbackTester-v$appVersion-installer"
 

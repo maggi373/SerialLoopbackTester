@@ -25,7 +25,7 @@ MAX_RS485_PAIR_COUNT = 128
 DEFAULT_PRESET_COUNT = 5
 FAILURE_WINDOW_SECONDS = 3600
 FAILURE_WINDOW_LABEL = "1h"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 APP_PUBLISHER = "PoldenTEK"
 SETTINGS_FILENAME = "serial_tester_settings.json"
 PARITY_OPTIONS = ("N", "E", "O", "M", "S")
@@ -1673,6 +1673,7 @@ class SerialTesterApp(tk.Tk):
         ui_section = ttk.LabelFrame(parent, text="Application", padding=10)
         ui_section.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         ui_section.columnconfigure(0, weight=1)
+        ui_section.columnconfigure(1, weight=0)
 
         self.start_fullscreen_var = tk.BooleanVar(value=bool(self.ui_settings.get("start_fullscreen", False)))
         ttk.Checkbutton(
@@ -1699,15 +1700,20 @@ class SerialTesterApp(tk.Tk):
             ui_section,
             text="Save settings to keep this as default on next launch.",
         ).grid(row=3, column=0, sticky="w", pady=(4, 0))
-        count_row = ttk.Frame(ui_section)
-        count_row.grid(row=4, column=0, sticky="w", pady=(8, 0))
+
+        right_controls = ttk.Frame(ui_section)
+        right_controls.grid(row=0, column=1, rowspan=4, sticky="ne", padx=(24, 0))
+
+        count_row = ttk.Frame(right_controls)
+        count_row.grid(row=0, column=0, sticky="e")
         ttk.Label(count_row, text="RS232 count").pack(side=tk.LEFT)
         ttk.Entry(count_row, textvariable=self.rs232_count_var, width=6).pack(side=tk.LEFT, padx=(6, 14))
         ttk.Label(count_row, text="RS485 pair count").pack(side=tk.LEFT)
         ttk.Entry(count_row, textvariable=self.rs485_count_var, width=6).pack(side=tk.LEFT, padx=(6, 10))
         ttk.Button(count_row, text="Apply Counts", command=self.apply_channel_counts).pack(side=tk.LEFT)
-        all_buttons = ttk.Frame(ui_section)
-        all_buttons.grid(row=5, column=0, sticky="w", pady=(8, 0))
+
+        all_buttons = ttk.Frame(right_controls)
+        all_buttons.grid(row=1, column=0, sticky="e", pady=(6, 0))
         ttk.Button(all_buttons, text="Enable All Ports", command=self.enable_all_ports).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(all_buttons, text="Disable All Ports", command=self.disable_all_ports).pack(side=tk.LEFT)
 

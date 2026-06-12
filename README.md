@@ -1,5 +1,5 @@
 # Serial Loopback Tester
-Version: `1.1.0`  
+Version: `1.1.1`  
 Made by: `maggi373`
 
 Python GUI tool for:
@@ -57,8 +57,8 @@ The build script checks `ISCC.exe` in `PATH`, `%LOCALAPPDATA%\Programs\Inno Setu
 Installer includes an optional checkbox to start the app with Windows (Startup folder shortcut for the installing user).
 
 Outputs:
-- Portable EXE: `dist\SerialLoopbackTester-v1.1.0-portable.exe`
-- Installer: `dist\installer\SerialLoopbackTester-v1.1.0-installer.exe`
+- Portable EXE: `dist\SerialLoopbackTester-v1.1.1-portable.exe`
+- Installer: `dist\installer\SerialLoopbackTester-v1.1.1-installer.exe`
 
 ## Usage
 1. Open the **Settings** tab.
