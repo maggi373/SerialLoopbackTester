@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from collections import deque
 import json
+import math
 import os
 import queue
+import shutil
 import sys
 import threading
 import time
@@ -25,14 +27,54 @@ MAX_RS485_PAIR_COUNT = 128
 DEFAULT_PRESET_COUNT = 5
 FAILURE_WINDOW_SECONDS = 3600
 FAILURE_WINDOW_LABEL = "1h"
-APP_VERSION = "1.1.1"
+WORKER_EVENT_POLL_MS = 50
+UI_RENDER_INTERVAL_MS = 200
+MAX_WORKER_EVENTS_PER_POLL = 500
+MAX_WORKER_EVENTS_DURING_WINDOW_MOTION = 50
+WINDOW_CONFIGURE_SETTLE_MS = 180
+MAX_LOG_LINES = 1200
+WORKER_JOIN_TIMEOUT_S = 0.75
+APP_VERSION = "1.2.0"
 APP_PUBLISHER = "PoldenTEK"
 SETTINGS_FILENAME = "serial_tester_settings.json"
+DEFAULT_BAUDRATE = 19200
+DEFAULT_INTERVAL_MS = 25
+MIN_INTERVAL_MS = 25
+DEFAULT_PACKET_SIZE_BYTES = 8
+MIN_PACKET_SIZE_BYTES = 1
+MAX_PACKET_SIZE_BYTES = 4096
+RS232_PAYLOAD_PATTERN_HEX = "55AA"
+RS485_PAYLOAD_PATTERN_HEX = "A55A"
+DEFAULT_RS232_PAYLOAD_HEX = "55AA55AA55AA55AA"
+DEFAULT_RS485_PAYLOAD_HEX = "A55AA55AA55AA55A"
 PARITY_OPTIONS = ("N", "E", "O", "M", "S")
 BYTESIZE_OPTIONS = ("5", "6", "7", "8")
 STOPBITS_OPTIONS = ("1", "1.5", "2")
 APP_FOLDER_NAME = "SerialLoopbackTester"
 STOPBITS_ALLOWED_VALUES = (1.0, 1.5, 2.0)
+RS232_WORKER_CONFIG_KEYS = (
+    "enabled",
+    "port",
+    "baudrate",
+    "bytesize",
+    "parity",
+    "stopbits",
+    "timeout_s",
+    "payload_hex",
+    "interval_ms",
+)
+RS485_WORKER_CONFIG_KEYS = (
+    "enabled",
+    "sender_port",
+    "echo_port",
+    "baudrate",
+    "bytesize",
+    "parity",
+    "stopbits",
+    "timeout_s",
+    "payload_hex",
+    "interval_ms",
+)
 
 
 def as_bool(value: object, default: bool) -> bool:
@@ -98,6 +140,13 @@ def validate_hex_payload(payload: str) -> str:
     return cleaned
 
 
+def payload_hex_for_size(pattern_hex: str, size_bytes: int) -> str:
+    size = max(MIN_PACKET_SIZE_BYTES, min(int(size_bytes), MAX_PACKET_SIZE_BYTES))
+    pattern = bytes.fromhex(pattern_hex)
+    repeats = (size + len(pattern) - 1) // len(pattern)
+    return (pattern * repeats)[:size].hex().upper()
+
+
 def parse_stopbits(value: object, default: float | None = None) -> float:
     text = str(value if value is not None else "").strip()
     if not text:
@@ -156,19 +205,48 @@ def normalize_port_list(values: object) -> list[str]:
     return normalized
 
 
+def normalize_name_text(value: object) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def normalize_name_key(value: object) -> str:
+    return normalize_name_text(value).casefold()
+
+
+def normalize_name_list(values: object) -> list[str]:
+    if isinstance(values, list):
+        source_values = values
+    elif isinstance(values, str):
+        source_values = values.split(",")
+    else:
+        source_values = []
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in source_values:
+        name = normalize_name_text(value)
+        key = normalize_name_key(name)
+        if name and key not in seen:
+            seen.add(key)
+            normalized.append(name)
+    return normalized
+
+
 def default_rs232_item(index: int) -> dict:
     number = index + 1
     return {
         "enabled": True,
         "name": f"RS232 {number}",
         "port": f"COM{number}",
-        "baudrate": 9600,
+        "baudrate": DEFAULT_BAUDRATE,
         "bytesize": 8,
         "parity": "N",
         "stopbits": 1,
         "timeout_s": 0.5,
-        "payload_hex": "55AA",
-        "interval_ms": 100,
+        "payload_hex": DEFAULT_RS232_PAYLOAD_HEX,
+        "interval_ms": DEFAULT_INTERVAL_MS,
     }
 
 
@@ -181,13 +259,13 @@ def default_rs485_item(index: int) -> dict:
         "name": f"RS485 Pair {number}",
         "sender_port": f"COM{sender}",
         "echo_port": f"COM{echo}",
-        "baudrate": 9600,
+        "baudrate": DEFAULT_BAUDRATE,
         "bytesize": 8,
         "parity": "N",
         "stopbits": 1,
         "timeout_s": 0.5,
-        "payload_hex": "A55A",
-        "interval_ms": 100,
+        "payload_hex": DEFAULT_RS485_PAYLOAD_HEX,
+        "interval_ms": DEFAULT_INTERVAL_MS,
     }
 
 
@@ -205,9 +283,12 @@ def normalize_rs232(item: object, index: int) -> dict:
 
     stopbits = parse_stopbits(source.get("stopbits", base["stopbits"]), default=float(base["stopbits"]))
 
-    baudrate = as_int(source.get("baudrate", base["baudrate"]), base["baudrate"])
-    interval_ms = max(as_int(source.get("interval_ms", base["interval_ms"]), base["interval_ms"]), 50)
-    timeout_s = max(as_float(source.get("timeout_s", base["timeout_s"]), base["timeout_s"]), 0.05)
+    baudrate = max(as_int(source.get("baudrate", base["baudrate"]), base["baudrate"]), 1)
+    interval_ms = max(as_int(source.get("interval_ms", base["interval_ms"]), base["interval_ms"]), MIN_INTERVAL_MS)
+    timeout_s = as_float(source.get("timeout_s", base["timeout_s"]), base["timeout_s"])
+    if not math.isfinite(timeout_s):
+        timeout_s = base["timeout_s"]
+    timeout_s = max(timeout_s, 0.05)
 
     name = str(source.get("name", base["name"])) or base["name"]
     if "port" in source:
@@ -246,9 +327,12 @@ def normalize_rs485(item: object, index: int) -> dict:
 
     stopbits = parse_stopbits(source.get("stopbits", base["stopbits"]), default=float(base["stopbits"]))
 
-    baudrate = as_int(source.get("baudrate", base["baudrate"]), base["baudrate"])
-    interval_ms = max(as_int(source.get("interval_ms", base["interval_ms"]), base["interval_ms"]), 50)
-    timeout_s = max(as_float(source.get("timeout_s", base["timeout_s"]), base["timeout_s"]), 0.05)
+    baudrate = max(as_int(source.get("baudrate", base["baudrate"]), base["baudrate"]), 1)
+    interval_ms = max(as_int(source.get("interval_ms", base["interval_ms"]), base["interval_ms"]), MIN_INTERVAL_MS)
+    timeout_s = as_float(source.get("timeout_s", base["timeout_s"]), base["timeout_s"])
+    if not math.isfinite(timeout_s):
+        timeout_s = base["timeout_s"]
+    timeout_s = max(timeout_s, 0.05)
 
     name = str(source.get("name", base["name"])) or base["name"]
     if "sender_port" in source:
@@ -285,6 +369,11 @@ def default_ui_settings() -> dict:
         "auto_start_after_launch_2s": True,
         "delay_comm_start_2s": True,
         "overview_compact_view": True,
+        "overview_hide_non_preset_ports": False,
+        "active_preset_idx": None,
+        "global_baudrate": DEFAULT_BAUDRATE,
+        "global_interval_ms": DEFAULT_INTERVAL_MS,
+        "global_packet_size_bytes": DEFAULT_PACKET_SIZE_BYTES,
         "rs232_count": DEFAULT_RS232_COUNT,
         "rs485_pair_count": DEFAULT_RS485_PAIR_COUNT,
         "presets": [default_preset_item(i) for i in range(DEFAULT_PRESET_COUNT)],
@@ -294,7 +383,7 @@ def default_ui_settings() -> dict:
 def default_preset_item(index: int) -> dict:
     return {
         "name": f"Preset {index + 1}",
-        "ports": [],
+        "names": [],
     }
 
 
@@ -302,11 +391,40 @@ def normalize_preset_item(item: object, index: int) -> dict:
     base = default_preset_item(index)
     source = item if isinstance(item, dict) else {}
     name = str(source.get("name", base["name"])).strip() or base["name"]
-    ports = normalize_port_list(source.get("ports", base["ports"]))
-    return {
+    names = normalize_name_list(source.get("names", base["names"]))
+    preset = {
         "name": name,
-        "ports": ports,
+        "names": names,
     }
+    legacy_ports = normalize_port_list(source.get("ports", []))
+    if legacy_ports:
+        preset["_legacy_ports"] = legacy_ports
+    return preset
+
+
+def migrate_preset_ports_to_names(presets: list[dict], rs232_ports: list[dict], rs485_pairs: list[dict]) -> None:
+    for preset in presets:
+        names = normalize_name_list(preset.get("names", []))
+        legacy_ports = set(normalize_port_list(preset.get("_legacy_ports", preset.get("ports", []))))
+
+        if not names and legacy_ports:
+            migrated_names: list[str] = []
+            for cfg in rs232_ports:
+                port = normalize_port_text(cfg.get("port"))
+                if port and port in legacy_ports:
+                    migrated_names.append(str(cfg.get("name", "")).strip())
+
+            for cfg in rs485_pairs:
+                sender = normalize_port_text(cfg.get("sender_port"))
+                echo = normalize_port_text(cfg.get("echo_port"))
+                if sender and echo and sender in legacy_ports and echo in legacy_ports:
+                    migrated_names.append(str(cfg.get("name", "")).strip())
+
+            names = normalize_name_list(migrated_names)
+
+        preset["names"] = names
+        preset.pop("ports", None)
+        preset.pop("_legacy_ports", None)
 
 
 def normalize_ui_settings(item: object) -> dict:
@@ -316,6 +434,13 @@ def normalize_ui_settings(item: object) -> dict:
     if not isinstance(raw_presets, list):
         raw_presets = []
     presets = [normalize_preset_item(raw_presets[i] if i < len(raw_presets) else {}, i) for i in range(DEFAULT_PRESET_COUNT)]
+    raw_active_preset_idx = source.get("active_preset_idx", base["active_preset_idx"])
+    active_preset_idx = None
+    if raw_active_preset_idx is not None:
+        parsed_active_preset_idx = as_int(raw_active_preset_idx, -1)
+        if 0 <= parsed_active_preset_idx < DEFAULT_PRESET_COUNT:
+            active_preset_idx = parsed_active_preset_idx
+
     return {
         "start_fullscreen": as_bool(source.get("start_fullscreen", base["start_fullscreen"]), base["start_fullscreen"]),
         "auto_start_after_launch_2s": as_bool(
@@ -326,6 +451,22 @@ def normalize_ui_settings(item: object) -> dict:
         "overview_compact_view": as_bool(
             source.get("overview_compact_view", base["overview_compact_view"]),
             base["overview_compact_view"],
+        ),
+        "overview_hide_non_preset_ports": as_bool(
+            source.get("overview_hide_non_preset_ports", base["overview_hide_non_preset_ports"]),
+            base["overview_hide_non_preset_ports"],
+        ),
+        "active_preset_idx": active_preset_idx,
+        "global_baudrate": max(as_int(source.get("global_baudrate", base["global_baudrate"]), base["global_baudrate"]), 1),
+        "global_interval_ms": max(
+            as_int(source.get("global_interval_ms", base["global_interval_ms"]), base["global_interval_ms"]),
+            MIN_INTERVAL_MS,
+        ),
+        "global_packet_size_bytes": normalize_count(
+            source.get("global_packet_size_bytes", base["global_packet_size_bytes"]),
+            base["global_packet_size_bytes"],
+            MIN_PACKET_SIZE_BYTES,
+            MAX_PACKET_SIZE_BYTES,
         ),
         "rs232_count": normalize_count(
             source.get("rs232_count", base["rs232_count"]),
@@ -370,6 +511,7 @@ def normalize_settings(raw: object) -> dict:
 
     rs232_ports = [normalize_rs232(raw_rs232[i] if i < len(raw_rs232) else {}, i) for i in range(rs232_count)]
     rs485_pairs = [normalize_rs485(raw_rs485[i] if i < len(raw_rs485) else {}, i) for i in range(rs485_count)]
+    migrate_preset_ports_to_names(ui["presets"], rs232_ports, rs485_pairs)
 
     return {"rs232_ports": rs232_ports, "rs485_pairs": rs485_pairs, "ui": ui}
 
@@ -377,23 +519,28 @@ def normalize_settings(raw: object) -> dict:
 def load_settings_file(path: Path) -> dict:
     if not path.exists():
         settings = default_settings()
-        path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+        save_settings_file(path, settings)
         return settings
 
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except json.JSONDecodeError:
+        backup_path = path.with_name(f"{path.stem}.invalid-{time.strftime('%Y%m%d-%H%M%S')}{path.suffix}.bak")
+        shutil.copy2(path, backup_path)
         settings = default_settings()
-        path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+        save_settings_file(path, settings)
         return settings
 
     settings = normalize_settings(raw)
-    path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    save_settings_file(path, settings)
     return settings
 
 
 def save_settings_file(path: Path, settings: dict) -> None:
-    path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.tmp")
+    temp_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    os.replace(temp_path, path)
 
 
 def resolve_documents_folder() -> Path:
@@ -451,15 +598,29 @@ def read_exact(port: serial.Serial, length: int, timeout_s: float, stop_event: t
 
 
 class RS232Worker(threading.Thread):
-    def __init__(self, index: int, config: dict, event_queue: queue.Queue):
+    def __init__(self, index: int, config: dict, event_queue: queue.Queue, worker_id: int = 0):
         super().__init__(daemon=True)
         self.index = index
         self.config = config
         self.event_queue = event_queue
+        self.worker_id = worker_id
         self.stop_event = threading.Event()
+        self.port_lock = threading.Lock()
+        self.active_port: serial.Serial | None = None
 
     def stop(self) -> None:
         self.stop_event.set()
+        with self.port_lock:
+            port = self.active_port
+        if port is None:
+            return
+        for method_name in ("cancel_read", "cancel_write"):
+            method = getattr(port, method_name, None)
+            if callable(method):
+                try:
+                    method()
+                except (SerialException, OSError):
+                    pass
 
     def emit(
         self,
@@ -467,16 +628,19 @@ class RS232Worker(threading.Thread):
         last: str,
         pass_inc: int = 0,
         fail_inc: int = 0,
+        error_inc: int = 0,
         log: bool = False,
     ) -> None:
         self.event_queue.put(
             {
                 "group": "rs232",
                 "index": self.index,
+                "worker_id": self.worker_id,
                 "status": status,
                 "last": last,
                 "pass_inc": pass_inc,
                 "fail_inc": fail_inc,
+                "error_inc": error_inc,
                 "log": log,
             }
         )
@@ -495,13 +659,15 @@ class RS232Worker(threading.Thread):
     def run(self) -> None:
         payload = bytes.fromhex(self.config["payload_hex"])
         timeout_s = max(float(self.config["timeout_s"]), 0.05)
-        interval_s = max(int(self.config["interval_ms"]) / 1000.0, 0.05)
+        interval_s = max(int(self.config["interval_ms"]) / 1000.0, MIN_INTERVAL_MS / 1000.0)
         startup_delay_s = max(as_float(self.config.get("startup_delay_s", 0.0), 0.0), 0.0)
         payload_hex = payload.hex(" ").upper()
 
         while not self.stop_event.is_set():
             try:
                 with self.open_port() as port:
+                    with self.port_lock:
+                        self.active_port = port
                     self.emit("Running", "Port open", log=True)
                     if startup_delay_s > 0:
                         self.emit("Standby", f"Startup delay {startup_delay_s:.1f}s")
@@ -513,7 +679,11 @@ class RS232Worker(threading.Thread):
                         port.reset_output_buffer()
                         written = port.write(payload)
                         port.flush()
+                        if self.stop_event.is_set():
+                            break
                         rx = read_exact(port, len(payload), timeout_s, self.stop_event)
+                        if self.stop_event.is_set():
+                            break
 
                         if written == len(payload) and rx == payload:
                             self.emit("PASS", f"TX/RX {payload_hex}", pass_inc=1)
@@ -529,25 +699,41 @@ class RS232Worker(threading.Thread):
                         if self.stop_event.wait(interval_s):
                             break
 
-            except (SerialException, OSError) as exc:
+            except (SerialException, OSError, ValueError) as exc:
                 if self.stop_event.is_set():
                     break
-                self.emit("ERROR", str(exc), fail_inc=1, log=True)
+                self.emit("ERROR", str(exc), fail_inc=1, error_inc=1, log=True)
                 self.stop_event.wait(2.0)
+            finally:
+                with self.port_lock:
+                    self.active_port = None
 
         self.emit("Stopped", "Worker stopped", log=True)
 
 
 class RS485PairWorker(threading.Thread):
-    def __init__(self, index: int, config: dict, event_queue: queue.Queue):
+    def __init__(self, index: int, config: dict, event_queue: queue.Queue, worker_id: int = 0):
         super().__init__(daemon=True)
         self.index = index
         self.config = config
         self.event_queue = event_queue
+        self.worker_id = worker_id
         self.stop_event = threading.Event()
+        self.port_lock = threading.Lock()
+        self.active_ports: tuple[serial.Serial, ...] = ()
 
     def stop(self) -> None:
         self.stop_event.set()
+        with self.port_lock:
+            ports = self.active_ports
+        for port in ports:
+            for method_name in ("cancel_read", "cancel_write"):
+                method = getattr(port, method_name, None)
+                if callable(method):
+                    try:
+                        method()
+                    except (SerialException, OSError):
+                        pass
 
     def emit(
         self,
@@ -555,16 +741,19 @@ class RS485PairWorker(threading.Thread):
         last: str,
         pass_inc: int = 0,
         fail_inc: int = 0,
+        error_inc: int = 0,
         log: bool = False,
     ) -> None:
         self.event_queue.put(
             {
                 "group": "rs485",
                 "index": self.index,
+                "worker_id": self.worker_id,
                 "status": status,
                 "last": last,
                 "pass_inc": pass_inc,
                 "fail_inc": fail_inc,
+                "error_inc": error_inc,
                 "log": log,
             }
         )
@@ -583,7 +772,7 @@ class RS485PairWorker(threading.Thread):
     def run(self) -> None:
         payload = bytes.fromhex(self.config["payload_hex"])
         timeout_s = max(float(self.config["timeout_s"]), 0.05)
-        interval_s = max(int(self.config["interval_ms"]) / 1000.0, 0.05)
+        interval_s = max(int(self.config["interval_ms"]) / 1000.0, MIN_INTERVAL_MS / 1000.0)
         startup_delay_s = max(as_float(self.config.get("startup_delay_s", 0.0), 0.0), 0.0)
         payload_hex = payload.hex(" ").upper()
 
@@ -591,6 +780,8 @@ class RS485PairWorker(threading.Thread):
             try:
                 with self.open_port(self.config["sender_port"]) as sender:
                     with self.open_port(self.config["echo_port"]) as echo:
+                        with self.port_lock:
+                            self.active_ports = (sender, echo)
                         self.emit("Running", "Ports open", log=True)
                         if startup_delay_s > 0:
                             self.emit("Standby", f"Startup delay {startup_delay_s:.1f}s")
@@ -605,8 +796,12 @@ class RS485PairWorker(threading.Thread):
 
                             sender.write(payload)
                             sender.flush()
+                            if self.stop_event.is_set():
+                                break
 
                             seen = read_exact(echo, len(payload), timeout_s, self.stop_event)
+                            if self.stop_event.is_set():
+                                break
                             if seen != payload:
                                 seen_hex = seen.hex(" ").upper() if seen else "<none>"
                                 self.emit(
@@ -621,8 +816,12 @@ class RS485PairWorker(threading.Thread):
 
                             echo.write(seen)
                             echo.flush()
+                            if self.stop_event.is_set():
+                                break
 
                             bounced = read_exact(sender, len(payload), timeout_s, self.stop_event)
+                            if self.stop_event.is_set():
+                                break
                             if bounced == payload:
                                 self.emit("PASS", f"TX/RX {payload_hex}", pass_inc=1)
                             else:
@@ -637,11 +836,14 @@ class RS485PairWorker(threading.Thread):
                             if self.stop_event.wait(interval_s):
                                 break
 
-            except (SerialException, OSError) as exc:
+            except (SerialException, OSError, ValueError) as exc:
                 if self.stop_event.is_set():
                     break
-                self.emit("ERROR", str(exc), fail_inc=1, log=True)
+                self.emit("ERROR", str(exc), fail_inc=1, error_inc=1, log=True)
                 self.stop_event.wait(2.0)
+            finally:
+                with self.port_lock:
+                    self.active_ports = ()
 
         self.emit("Stopped", "Worker stopped", log=True)
 
@@ -664,12 +866,21 @@ class SerialTesterApp(tk.Tk):
         self.rs232_state = [self.new_state() for _ in self.rs232_configs]
         self.rs485_state = [self.new_state() for _ in self.rs485_configs]
         self.overview_compact_var = tk.BooleanVar(value=bool(self.ui_settings.get("overview_compact_view", True)))
+        self.overview_hide_non_preset_ports_var = tk.BooleanVar(
+            value=bool(self.ui_settings.get("overview_hide_non_preset_ports", False))
+        )
+        self.global_baudrate_var = tk.StringVar(value=str(self.ui_settings.get("global_baudrate", DEFAULT_BAUDRATE)))
+        self.global_interval_var = tk.StringVar(value=str(self.ui_settings.get("global_interval_ms", DEFAULT_INTERVAL_MS)))
+        self.global_packet_size_var = tk.StringVar(
+            value=str(self.ui_settings.get("global_packet_size_bytes", DEFAULT_PACKET_SIZE_BYTES))
+        )
         self.rs232_count_var = tk.StringVar(value=str(len(self.rs232_configs)))
         self.rs485_count_var = tk.StringVar(value=str(len(self.rs485_configs)))
 
         self.event_queue: queue.Queue = queue.Queue()
         self.rs232_workers: dict[int, RS232Worker] = {}
         self.rs485_workers: dict[int, RS485PairWorker] = {}
+        self.next_worker_id = 1
         self.overview_rows: dict[tuple[str, int], dict] = {}
         self.overview_rows_canvas: tk.Canvas | None = None
         self.overview_rows_frame: ttk.Frame | None = None
@@ -677,16 +888,28 @@ class SerialTesterApp(tk.Tk):
         self.com_port_values = [""]
         self.failure_counts: deque[tuple[int, int]] = deque()
         self.fault_rows_limit = 2000
+        self.fault_records: deque[tuple[str, str, str, str, str, str, str]] = deque(maxlen=self.fault_rows_limit)
         self.channel_fault_history: set[tuple[str, int]] = set()
         self.launch_autostart_scheduled = False
         self.app_start_monotonic = time.monotonic()
         self.preset_name_vars: list[tk.StringVar] = []
         self.preset_panels: list[ttk.LabelFrame] = []
-        self.preset_port_listboxes: list[tk.Listbox] = []
-        self.preset_port_options: list[str] = []
+        self.preset_name_listboxes: list[tk.Listbox] = []
+        self.preset_name_options: list[dict[str, str]] = []
         self.preset_buttons: list[ttk.Button] = []
+        self.active_preset_idx: int | None = self.ui_settings.get("active_preset_idx")
+        self.pending_rs232_refreshes: set[int] = set()
+        self.pending_rs485_refreshes: set[int] = set()
+        self.pending_health_refresh = False
+        self.ui_refresh_after_id: str | None = None
+        self.window_configure_after_id: str | None = None
+        self.window_motion_active = False
         self.is_fullscreen = False
-        self.log_line_count = 0
+        self.log_lines: deque[str] = deque(maxlen=MAX_LOG_LINES)
+        self.log_version = 0
+        self.rendered_log_version = -1
+        self.last_failure_log_at: dict[tuple[str, int], float] = {}
+        self.suppressed_failure_logs: dict[tuple[str, int], int] = {}
         self.health_total_pass_var = tk.StringVar(value="Total Pass: 0")
         self.health_total_fail_var = tk.StringVar(value="Total Fail: 0")
         self.health_total_errors_var = tk.StringVar(value="Total Errors: 0")
@@ -712,14 +935,15 @@ class SerialTesterApp(tk.Tk):
             self.launch_autostart_scheduled = True
             self.after(2000, self._auto_start_after_launch)
         self._refresh_health_panel()
-        self.after(100, self._process_worker_events)
+        self.after(WORKER_EVENT_POLL_MS, self._process_worker_events)
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.bind("<F11>", self._on_toggle_fullscreen)
         self.bind("<Escape>", self._on_exit_fullscreen)
+        self.bind("<Configure>", self._on_window_configure)
 
     @staticmethod
     def new_state() -> dict:
-        return {"status": "Idle", "pass_count": 0, "fail_count": 0, "last": ""}
+        return {"status": "Idle", "pass_count": 0, "fail_count": 0, "error_count": 0, "last": ""}
 
     @staticmethod
     def _format_duration(total_seconds: float) -> str:
@@ -732,6 +956,51 @@ class SerialTesterApp(tk.Tk):
         self.title(
             f"Serial Loopback Tester v{APP_VERSION} ({len(self.rs232_configs)}x RS232 + {len(self.rs485_configs)}x RS485 Pairs)"
         )
+
+    def _active_tab_text(self) -> str:
+        if not hasattr(self, "notebook"):
+            return ""
+        selected = self.notebook.select()
+        return str(self.notebook.tab(selected, "text")) if selected else ""
+
+    def _on_notebook_tab_changed(self, _event: object) -> None:
+        active_tab = self._active_tab_text()
+        if active_tab == "Overview":
+            for idx in range(len(self.rs232_configs)):
+                self._refresh_overview_row("rs232", idx)
+            for idx in range(len(self.rs485_configs)):
+                self._refresh_overview_row("rs485", idx)
+            self._refresh_health_panel(include_issue_tree=False)
+        elif active_tab == "Health":
+            self._refresh_health_panel(include_issue_tree=True)
+        elif active_tab == "Fault Review":
+            self._render_fault_history()
+        elif active_tab == "RS232 Monitor":
+            for idx in range(len(self.rs232_configs)):
+                self.refresh_rs232_row(idx, include_settings=False, include_overview=False)
+        elif active_tab == "RS485 Monitor":
+            for idx in range(len(self.rs485_configs)):
+                self.refresh_rs485_row(idx, include_settings=False, include_overview=False)
+        elif active_tab == "Log":
+            self._render_log_history()
+
+    def _on_window_configure(self, event: tk.Event) -> None:
+        if event.widget is not self:
+            return
+        self.window_motion_active = True
+        if self.window_configure_after_id is not None:
+            self.after_cancel(self.window_configure_after_id)
+        self.window_configure_after_id = self.after(WINDOW_CONFIGURE_SETTLE_MS, self._on_window_configure_settled)
+
+    def _on_window_configure_settled(self) -> None:
+        self.window_configure_after_id = None
+        self.window_motion_active = False
+        if self.pending_rs232_refreshes or self.pending_rs485_refreshes or self.pending_health_refresh:
+            self._schedule_render_flush()
+        if self._active_tab_text() == "Log" and self.rendered_log_version != self.log_version:
+            self._render_log_history()
+        if self._active_tab_text() == "Fault Review":
+            self._render_fault_history()
 
     def _build_ui(self) -> None:
         self.columnconfigure(0, weight=1)
@@ -773,26 +1042,27 @@ class SerialTesterApp(tk.Tk):
         )
         self.status_label.pack(side=tk.RIGHT)
 
-        notebook = ttk.Notebook(self)
-        notebook.grid(row=1, column=0, sticky="nsew")
+        self.notebook = ttk.Notebook(self)
+        self.notebook.grid(row=1, column=0, sticky="nsew")
 
-        overview_tab = ttk.Frame(notebook, padding=(8, 8))
-        health_tab = ttk.Frame(notebook, padding=(8, 8))
-        faults_tab = ttk.Frame(notebook, padding=(8, 8))
-        presets_tab = ttk.Frame(notebook, padding=(8, 8))
-        rs232_tab = ttk.Frame(notebook, padding=(8, 8))
-        rs485_tab = ttk.Frame(notebook, padding=(8, 8))
-        settings_tab = ttk.Frame(notebook, padding=(8, 8))
-        log_tab = ttk.Frame(notebook, padding=(8, 8))
+        overview_tab = ttk.Frame(self.notebook, padding=(8, 8))
+        health_tab = ttk.Frame(self.notebook, padding=(8, 8))
+        faults_tab = ttk.Frame(self.notebook, padding=(8, 8))
+        presets_tab = ttk.Frame(self.notebook, padding=(8, 8))
+        rs232_tab = ttk.Frame(self.notebook, padding=(8, 8))
+        rs485_tab = ttk.Frame(self.notebook, padding=(8, 8))
+        settings_tab = ttk.Frame(self.notebook, padding=(8, 8))
+        log_tab = ttk.Frame(self.notebook, padding=(8, 8))
 
-        notebook.add(overview_tab, text="Overview")
-        notebook.add(health_tab, text="Health")
-        notebook.add(faults_tab, text="Fault Review")
-        notebook.add(presets_tab, text="Presets")
-        notebook.add(rs232_tab, text="RS232 Monitor")
-        notebook.add(rs485_tab, text="RS485 Monitor")
-        notebook.add(settings_tab, text="Settings")
-        notebook.add(log_tab, text="Log")
+        self.notebook.add(overview_tab, text="Overview")
+        self.notebook.add(health_tab, text="Health")
+        self.notebook.add(faults_tab, text="Fault Review")
+        self.notebook.add(presets_tab, text="Presets")
+        self.notebook.add(rs232_tab, text="RS232 Monitor")
+        self.notebook.add(rs485_tab, text="RS485 Monitor")
+        self.notebook.add(settings_tab, text="Settings")
+        self.notebook.add(log_tab, text="Log")
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_notebook_tab_changed)
 
         self._build_overview_tab(overview_tab)
         self._build_health_tab(health_tab)
@@ -827,7 +1097,10 @@ class SerialTesterApp(tk.Tk):
 
     def _on_overview_layout_changed(self) -> None:
         self.ui_settings["overview_compact_view"] = bool(self.overview_compact_var.get())
+        self.ui_settings["overview_hide_non_preset_ports"] = bool(self.overview_hide_non_preset_ports_var.get())
+        self.ui_settings["active_preset_idx"] = self.active_preset_idx
         self._rebuild_overview_rows()
+        self.save_settings(show_message=False)
 
     def _on_toggle_fullscreen(self, _event: tk.Event) -> str:
         self.toggle_fullscreen()
@@ -859,7 +1132,7 @@ class SerialTesterApp(tk.Tk):
             combo = getattr(self, attr, None)
             if combo is not None:
                 combo.configure(values=self.com_port_values)
-        self._refresh_preset_port_options(show_message=False)
+        self._refresh_preset_name_options(show_message=False)
 
         if show_message:
             if error_text:
@@ -877,24 +1150,32 @@ class SerialTesterApp(tk.Tk):
             return (0, int(text[3:]), text)
         return (1, 0, text)
 
-    def _collect_preset_port_options(self) -> list[str]:
-        options: set[str] = set()
-        for port in self.com_port_values:
-            normalized = normalize_port_text(port)
-            if normalized:
-                options.add(normalized)
-        for cfg in self.rs232_configs:
-            normalized = normalize_port_text(cfg["port"])
-            if normalized:
-                options.add(normalized)
-        for cfg in self.rs485_configs:
-            sender = normalize_port_text(cfg["sender_port"])
-            echo = normalize_port_text(cfg["echo_port"])
-            if sender:
-                options.add(sender)
-            if echo:
-                options.add(echo)
-        return sorted(options, key=self._com_port_sort_key)
+    def _collect_preset_name_options(self) -> list[dict[str, str]]:
+        options: list[dict[str, str]] = []
+        for idx, cfg in enumerate(self.rs232_configs):
+            name = normalize_name_text(cfg["name"]) or f"RS232 {idx + 1}"
+            port = normalize_port_text(cfg["port"]) or "No port"
+            options.append(
+                {
+                    "name": name,
+                    "key": normalize_name_key(name),
+                    "label": f"{name}  [RS232 #{idx + 1}, {port}]",
+                }
+            )
+
+        for idx, cfg in enumerate(self.rs485_configs):
+            name = normalize_name_text(cfg["name"]) or f"RS485 Pair {idx + 1}"
+            sender = normalize_port_text(cfg["sender_port"]) or "No sender"
+            echo = normalize_port_text(cfg["echo_port"]) or "No echo"
+            options.append(
+                {
+                    "name": name,
+                    "key": normalize_name_key(name),
+                    "label": f"{name}  [RS485 #{idx + 1}, {sender} <-> {echo}]",
+                }
+            )
+
+        return options
 
     def _refresh_preset_button_labels(self) -> None:
         for idx, button in enumerate(self.preset_buttons):
@@ -904,14 +1185,15 @@ class SerialTesterApp(tk.Tk):
                 if idx < len(self.preset_panels):
                     self.preset_panels[idx].configure(text=f"Preset {idx + 1}: {preset_name}")
 
-    def _get_selected_ports_from_listbox(self, listbox: tk.Listbox) -> list[str]:
+    def _get_selected_names_from_listbox(self, listbox: tk.Listbox) -> list[str]:
         selected_indices = listbox.curselection()
-        ports: list[str] = []
+        names: list[str] = []
         for sel_idx in selected_indices:
-            port = normalize_port_text(listbox.get(sel_idx))
-            if port:
-                ports.append(port)
-        return normalize_port_list(ports)
+            if 0 <= sel_idx < len(self.preset_name_options):
+                name = normalize_name_text(self.preset_name_options[sel_idx]["name"])
+                if name:
+                    names.append(name)
+        return normalize_name_list(names)
 
     def _on_preset_name_changed(self, idx: int) -> None:
         if not (0 <= idx < len(self.preset_configs)):
@@ -920,42 +1202,42 @@ class SerialTesterApp(tk.Tk):
         self.preset_configs[idx]["name"] = new_name
         self._refresh_preset_button_labels()
 
-    def _on_preset_ports_selected(self, idx: int) -> None:
-        if not (0 <= idx < len(self.preset_configs)) or idx >= len(self.preset_port_listboxes):
+    def _on_preset_names_selected(self, idx: int) -> None:
+        if not (0 <= idx < len(self.preset_configs)) or idx >= len(self.preset_name_listboxes):
             return
-        self.preset_configs[idx]["ports"] = self._get_selected_ports_from_listbox(self.preset_port_listboxes[idx])
+        self.preset_configs[idx]["names"] = self._get_selected_names_from_listbox(self.preset_name_listboxes[idx])
 
-    def _select_all_preset_ports(self, idx: int) -> None:
-        if not (0 <= idx < len(self.preset_port_listboxes)):
+    def _select_all_preset_names(self, idx: int) -> None:
+        if not (0 <= idx < len(self.preset_name_listboxes)):
             return
-        listbox = self.preset_port_listboxes[idx]
+        listbox = self.preset_name_listboxes[idx]
         if listbox.size() > 0:
             listbox.selection_set(0, tk.END)
-        self._on_preset_ports_selected(idx)
+        self._on_preset_names_selected(idx)
 
-    def _clear_preset_ports(self, idx: int) -> None:
-        if not (0 <= idx < len(self.preset_port_listboxes)):
+    def _clear_preset_names(self, idx: int) -> None:
+        if not (0 <= idx < len(self.preset_name_listboxes)):
             return
-        listbox = self.preset_port_listboxes[idx]
+        listbox = self.preset_name_listboxes[idx]
         listbox.selection_clear(0, tk.END)
-        self._on_preset_ports_selected(idx)
+        self._on_preset_names_selected(idx)
 
-    def _refresh_preset_port_options(self, show_message: bool = False) -> None:
-        self.preset_port_options = self._collect_preset_port_options()
-        if not self.preset_port_listboxes:
+    def _refresh_preset_name_options(self, show_message: bool = False) -> None:
+        self.preset_name_options = self._collect_preset_name_options()
+        if not self.preset_name_listboxes:
             return
 
-        for idx, listbox in enumerate(self.preset_port_listboxes):
-            current_selected = set(self.preset_configs[idx]["ports"])
+        for idx, listbox in enumerate(self.preset_name_listboxes):
+            current_selected = {normalize_name_key(name) for name in normalize_name_list(self.preset_configs[idx]["names"])}
             listbox.delete(0, tk.END)
-            for port in self.preset_port_options:
-                listbox.insert(tk.END, port)
-            for item_idx, port in enumerate(self.preset_port_options):
-                if port in current_selected:
+            for option in self.preset_name_options:
+                listbox.insert(tk.END, option["label"])
+            for item_idx, option in enumerate(self.preset_name_options):
+                if option["key"] in current_selected:
                     listbox.selection_set(item_idx)
 
         if show_message:
-            messagebox.showinfo("Preset ports", f"Loaded {len(self.preset_port_options)} selectable COM port(s).")
+            messagebox.showinfo("Preset names", f"Loaded {len(self.preset_name_options)} selectable channel name(s).")
 
     def _build_presets_tab(self, parent: ttk.Frame) -> None:
         parent.columnconfigure(0, weight=1)
@@ -964,10 +1246,10 @@ class SerialTesterApp(tk.Tk):
         top = ttk.Frame(parent)
         top.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         top.columnconfigure(0, weight=1)
-        ttk.Label(top, text="Configure 5 named presets and select which COM ports each preset enables/disables.").grid(
+        ttk.Label(top, text="Configure 5 named presets and select which channel names each preset enables/disables.").grid(
             row=0, column=0, sticky="w"
         )
-        ttk.Button(top, text="Refresh Port Choices", command=lambda: self._refresh_preset_port_options(show_message=True)).grid(
+        ttk.Button(top, text="Refresh Name Choices", command=lambda: self._refresh_preset_name_options(show_message=True)).grid(
             row=0, column=1, sticky="e", padx=(8, 0)
         )
         ttk.Button(top, text="Save Presets", command=lambda: self.save_settings(show_message=True)).grid(
@@ -984,7 +1266,7 @@ class SerialTesterApp(tk.Tk):
 
         self.preset_name_vars = []
         self.preset_panels = []
-        self.preset_port_listboxes = []
+        self.preset_name_listboxes = []
         for idx in range(DEFAULT_PRESET_COUNT):
             preset_name = self.preset_configs[idx]["name"]
             pane = ttk.LabelFrame(grid, text=f"Preset {idx + 1}: {preset_name}", padding=8)
@@ -1002,38 +1284,60 @@ class SerialTesterApp(tk.Tk):
 
             listbox = tk.Listbox(pane, selectmode=tk.MULTIPLE, exportselection=False, height=7)
             listbox.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(6, 6))
-            listbox.bind("<<ListboxSelect>>", lambda _event, i=idx: self._on_preset_ports_selected(i))
-            self.preset_port_listboxes.append(listbox)
+            listbox.bind("<<ListboxSelect>>", lambda _event, i=idx: self._on_preset_names_selected(i))
+            self.preset_name_listboxes.append(listbox)
 
             actions = ttk.Frame(pane)
             actions.grid(row=2, column=0, columnspan=2, sticky="ew")
-            ttk.Button(actions, text="Select All", command=lambda i=idx: self._select_all_preset_ports(i)).pack(
+            ttk.Button(actions, text="Select All", command=lambda i=idx: self._select_all_preset_names(i)).pack(
                 side=tk.LEFT, padx=(0, 6)
             )
-            ttk.Button(actions, text="Clear", command=lambda i=idx: self._clear_preset_ports(i)).pack(side=tk.LEFT)
+            ttk.Button(actions, text="Clear", command=lambda i=idx: self._clear_preset_names(i)).pack(side=tk.LEFT)
 
         self._refresh_preset_button_labels()
-        self._refresh_preset_port_options(show_message=False)
+        self._refresh_preset_name_options(show_message=False)
 
     def _sync_presets_from_ui(self) -> None:
         for idx in range(DEFAULT_PRESET_COUNT):
             if idx < len(self.preset_name_vars):
                 self.preset_configs[idx]["name"] = self.preset_name_vars[idx].get().strip() or f"Preset {idx + 1}"
-            if idx < len(self.preset_port_listboxes):
-                self.preset_configs[idx]["ports"] = self._get_selected_ports_from_listbox(self.preset_port_listboxes[idx])
+            if idx < len(self.preset_name_listboxes):
+                self.preset_configs[idx]["names"] = self._get_selected_names_from_listbox(self.preset_name_listboxes[idx])
             else:
-                self.preset_configs[idx]["ports"] = normalize_port_list(self.preset_configs[idx].get("ports", []))
+                self.preset_configs[idx]["names"] = normalize_name_list(self.preset_configs[idx].get("names", []))
+            self.preset_configs[idx].pop("ports", None)
         self._refresh_preset_button_labels()
 
-    def _rs232_in_port_set(self, idx: int, selected_ports: set[str]) -> bool:
-        cfg_port = normalize_port_text(self.rs232_configs[idx]["port"])
-        return bool(cfg_port) and cfg_port in selected_ports
+    def _replace_preset_name_reference(self, old_name: str, new_name: str) -> None:
+        old_key = normalize_name_key(old_name)
+        new_name = normalize_name_text(new_name)
+        if not old_key or not new_name:
+            return
 
-    def _rs485_in_port_set(self, idx: int, selected_ports: set[str]) -> bool:
-        cfg = self.rs485_configs[idx]
-        sender = normalize_port_text(cfg["sender_port"])
-        echo = normalize_port_text(cfg["echo_port"])
-        return bool(sender and echo) and sender in selected_ports and echo in selected_ports
+        for preset in self.preset_configs:
+            updated_names: list[str] = []
+            changed = False
+            for selected_name in normalize_name_list(preset.get("names", [])):
+                if normalize_name_key(selected_name) == old_key:
+                    updated_names.append(new_name)
+                    changed = True
+                else:
+                    updated_names.append(selected_name)
+            if changed:
+                preset["names"] = normalize_name_list(updated_names)
+
+    def _preset_selected_name_keys(self, idx: int) -> set[str]:
+        if not (0 <= idx < len(self.preset_configs)):
+            return set()
+        return {normalize_name_key(name) for name in normalize_name_list(self.preset_configs[idx].get("names", []))}
+
+    def _rs232_in_name_set(self, idx: int, selected_names: set[str]) -> bool:
+        cfg_name = normalize_name_key(self.rs232_configs[idx]["name"])
+        return bool(cfg_name) and cfg_name in selected_names
+
+    def _rs485_in_name_set(self, idx: int, selected_names: set[str]) -> bool:
+        cfg_name = normalize_name_key(self.rs485_configs[idx]["name"])
+        return bool(cfg_name) and cfg_name in selected_names
 
     def apply_preset(self, idx: int) -> None:
         if not (0 <= idx < len(self.preset_configs)):
@@ -1041,42 +1345,78 @@ class SerialTesterApp(tk.Tk):
 
         self._sync_presets_from_ui()
         preset = self.preset_configs[idx]
-        selected_ports = set(normalize_port_list(preset.get("ports", [])))
+        selected_names = self._preset_selected_name_keys(idx)
         enabled_count = 0
         disabled_count = 0
         stopped = 0
+        started = 0
+        rs232_was_running = bool(self.rs232_workers)
+        rs485_was_running = bool(self.rs485_workers)
+        self.active_preset_idx = idx
+        self.ui_settings["active_preset_idx"] = idx
 
         for rs232_idx in range(len(self.rs232_configs)):
             cfg = self.rs232_configs[rs232_idx]
-            should_enable = self._rs232_in_port_set(rs232_idx, selected_ports)
+            should_enable = self._rs232_in_name_set(rs232_idx, selected_names)
             cfg["enabled"] = should_enable
             if should_enable:
                 enabled_count += 1
             else:
                 disabled_count += 1
             if (not should_enable) and (rs232_idx in self.rs232_workers):
-                self.stop_single_test("rs232", rs232_idx, log_event=False)
+                self.stop_single_test("rs232", rs232_idx, log_event=False, refresh_health=False)
                 stopped += 1
             else:
                 self.refresh_rs232_row(rs232_idx)
 
         for rs485_idx in range(len(self.rs485_configs)):
             cfg = self.rs485_configs[rs485_idx]
-            should_enable = self._rs485_in_port_set(rs485_idx, selected_ports)
+            should_enable = self._rs485_in_name_set(rs485_idx, selected_names)
             cfg["enabled"] = should_enable
             if should_enable:
                 enabled_count += 1
             else:
                 disabled_count += 1
             if (not should_enable) and (rs485_idx in self.rs485_workers):
-                self.stop_single_test("rs485", rs485_idx, log_event=False)
+                self.stop_single_test("rs485", rs485_idx, log_event=False, refresh_health=False)
                 stopped += 1
             else:
                 self.refresh_rs485_row(rs485_idx)
 
+        if rs232_was_running:
+            for rs232_idx in range(len(self.rs232_configs)):
+                if self._rs232_in_name_set(rs232_idx, selected_names) and rs232_idx not in self.rs232_workers:
+                    if self._is_rs232_startable(rs232_idx):
+                        self.start_single_test(
+                            "rs232",
+                            rs232_idx,
+                            startup_delay_s=0.0,
+                            reset_counts=False,
+                            log_event=False,
+                            refresh_health=False,
+                        )
+                        started += 1
+
+        if rs485_was_running:
+            for rs485_idx in range(len(self.rs485_configs)):
+                if self._rs485_in_name_set(rs485_idx, selected_names) and rs485_idx not in self.rs485_workers:
+                    if self._is_rs485_startable(rs485_idx):
+                        self.start_single_test(
+                            "rs485",
+                            rs485_idx,
+                            startup_delay_s=0.0,
+                            reset_counts=False,
+                            log_event=False,
+                            refresh_health=False,
+                        )
+                        started += 1
+
         self.save_settings(show_message=False)
+        self._rebuild_overview_rows()
+        self._refresh_health_panel()
         self.append_log(
-            f'Preset "{preset["name"]}" applied ({enabled_count} enabled, {disabled_count} disabled, {stopped} stopped).'
+            f'Preset "{preset["name"]}" applied '
+            f"({enabled_count} enabled, {disabled_count} disabled, {stopped} stopped, {started} started)."
         )
 
     def _build_health_tab(self, parent: ttk.Frame) -> None:
@@ -1185,6 +1525,7 @@ class SerialTesterApp(tk.Tk):
         scroll.grid(row=0, column=1, sticky="ns")
 
     def clear_fault_review(self) -> None:
+        self.fault_records.clear()
         self.fault_tree.delete(*self.fault_tree.get_children())
         self.channel_fault_history.clear()
         self._refresh_health_panel()
@@ -1210,23 +1551,29 @@ class SerialTesterApp(tk.Tk):
             ports = f'{cfg["sender_port"]} <-> {cfg["echo_port"]}'
 
         stamp = time.strftime("%Y-%m-%d %H:%M:%S")
-        self.fault_tree.insert(
-            "",
-            0,
-            values=(
-                stamp,
-                channel,
-                cfg["name"],
-                ports,
-                previous_status,
-                new_status,
-                detail,
-            ),
+        record = (
+            stamp,
+            channel,
+            cfg["name"],
+            ports,
+            previous_status,
+            new_status,
+            detail,
         )
+        self.fault_records.appendleft(record)
 
-        children = self.fault_tree.get_children()
-        if len(children) > self.fault_rows_limit:
-            self.fault_tree.delete(*children[self.fault_rows_limit :])
+        if self._active_tab_text() == "Fault Review" and not self.window_motion_active:
+            self.fault_tree.insert("", 0, values=record)
+            children = self.fault_tree.get_children()
+            if len(children) > self.fault_rows_limit:
+                self.fault_tree.delete(*children[self.fault_rows_limit :])
+
+    def _render_fault_history(self) -> None:
+        if not hasattr(self, "fault_tree") or self.window_motion_active:
+            return
+        self.fault_tree.delete(*self.fault_tree.get_children())
+        for record in self.fault_records:
+            self.fault_tree.insert("", tk.END, values=record)
 
     def _record_failure_event(self) -> None:
         now_sec = int(time.time())
@@ -1247,10 +1594,12 @@ class SerialTesterApp(tk.Tk):
         self._trim_failure_counts()
         return sum(count for _sec, count in self.failure_counts)
 
-    def _refresh_health_panel(self) -> None:
+    def _refresh_health_panel(self, include_issue_tree: bool = True) -> None:
         total_pass = sum(item["pass_count"] for item in self.rs232_state) + sum(item["pass_count"] for item in self.rs485_state)
         total_fail = sum(item["fail_count"] for item in self.rs232_state) + sum(item["fail_count"] for item in self.rs485_state)
-        total_errors = total_fail
+        total_errors = sum(item["error_count"] for item in self.rs232_state) + sum(
+            item["error_count"] for item in self.rs485_state
+        )
         active_workers = len(self.rs232_workers) + len(self.rs485_workers)
         recent_failures = self._recent_failure_count()
         runtime_seconds = time.monotonic() - self.app_start_monotonic
@@ -1262,7 +1611,7 @@ class SerialTesterApp(tk.Tk):
         self.health_active_workers_var.set(f"Active Workers: {active_workers}")
         self.health_recent_fail_var.set(f"Fails Last {FAILURE_WINDOW_LABEL}: {recent_failures}")
         self.health_runtime_var.set(f"Run Time: {runtime_text}")
-        self.health_fault_review_count_var.set(f"Faults Logged: {len(self.fault_tree.get_children())}")
+        self.health_fault_review_count_var.set(f"Faults Logged: {len(self.fault_records)}")
 
         current_issues: list[tuple[str, str, str, str, str]] = []
         for idx, state in enumerate(self.rs232_state):
@@ -1276,7 +1625,7 @@ class SerialTesterApp(tk.Tk):
                     ("RS485", cfg["name"], f'{cfg["sender_port"]} <-> {cfg["echo_port"]}', state["status"], state["last"])
                 )
 
-        fault_review_count = len(self.fault_tree.get_children())
+        fault_review_count = len(self.fault_records)
         green_ready = runtime_seconds >= FAILURE_WINDOW_SECONDS and recent_failures == 0
 
         if current_issues:
@@ -1298,7 +1647,7 @@ class SerialTesterApp(tk.Tk):
         if self.overview_alarm_canvas is not None and self.overview_alarm_rect is not None:
             self.overview_alarm_canvas.itemconfigure(self.overview_alarm_rect, fill=alarm_color)
 
-        if self.health_issue_tree is not None:
+        if include_issue_tree and self.health_issue_tree is not None:
             self.health_issue_tree.delete(*self.health_issue_tree.get_children())
             for issue in current_issues:
                 self.health_issue_tree.insert("", tk.END, values=issue)
@@ -1356,10 +1705,16 @@ class SerialTesterApp(tk.Tk):
         ).grid(row=0, column=0, sticky="w")
         ttk.Checkbutton(
             legend,
+            text="Hide Non-Preset Ports",
+            variable=self.overview_hide_non_preset_ports_var,
+            command=self._on_overview_layout_changed,
+        ).grid(row=0, column=1, sticky="e", padx=(8, 0))
+        ttk.Checkbutton(
+            legend,
             text="Compact View (2 Columns)",
             variable=self.overview_compact_var,
             command=self._on_overview_layout_changed,
-        ).grid(row=0, column=1, sticky="e")
+        ).grid(row=0, column=2, sticky="e", padx=(8, 0))
 
         health = ttk.LabelFrame(parent, text="Health", padding=(8, 6))
         health.grid(row=1, column=0, sticky="ew", pady=(0, 8))
@@ -1420,6 +1775,22 @@ class SerialTesterApp(tk.Tk):
 
         self._rebuild_overview_rows()
 
+    def _overview_selected_name_filter(self) -> set[str] | None:
+        if not bool(self.overview_hide_non_preset_ports_var.get()):
+            return None
+        if self.active_preset_idx is None:
+            return None
+        return self._preset_selected_name_keys(self.active_preset_idx)
+
+    def _should_show_in_overview(self, group: str, idx: int, selected_names: set[str] | None) -> bool:
+        if selected_names is None:
+            return True
+        if group == "rs232":
+            return self._rs232_in_name_set(idx, selected_names)
+        if group == "rs485":
+            return self._rs485_in_name_set(idx, selected_names)
+        return True
+
     def _rebuild_overview_rows(self) -> None:
         if self.overview_rows_frame is None:
             return
@@ -1429,7 +1800,10 @@ class SerialTesterApp(tk.Tk):
         self.overview_rows.clear()
 
         overview_idx = 0
+        selected_names = self._overview_selected_name_filter()
         for idx in range(len(self.rs232_configs)):
+            if not self._should_show_in_overview("rs232", idx, selected_names):
+                continue
             add_row = self._add_overview_compact_row if self.overview_compact_var.get() else self._add_overview_row
             add_row(
                 self.overview_rows_frame,
@@ -1444,6 +1818,8 @@ class SerialTesterApp(tk.Tk):
             overview_idx += 1
 
         for idx in range(len(self.rs485_configs)):
+            if not self._should_show_in_overview("rs485", idx, selected_names):
+                continue
             cfg = self.rs485_configs[idx]
             add_row = self._add_overview_compact_row if self.overview_compact_var.get() else self._add_overview_row
             add_row(
@@ -1475,7 +1851,7 @@ class SerialTesterApp(tk.Tk):
         ports: str,
     ) -> None:
         parent.columnconfigure(grid_col, weight=1)
-        row = ttk.Frame(parent, padding=(4, 2))
+        row = ttk.Frame(parent, padding=(4, 2), relief=tk.SOLID, borderwidth=1)
         row.grid(row=grid_row, column=grid_col, sticky="ew", padx=4, pady=2)
         row.columnconfigure(2, weight=1)
 
@@ -1703,6 +2079,8 @@ class SerialTesterApp(tk.Tk):
 
         right_controls = ttk.Frame(ui_section)
         right_controls.grid(row=0, column=1, rowspan=4, sticky="ne", padx=(24, 0))
+        right_controls.columnconfigure(0, weight=0)
+        right_controls.columnconfigure(1, weight=0)
 
         count_row = ttk.Frame(right_controls)
         count_row.grid(row=0, column=0, sticky="e")
@@ -1716,6 +2094,22 @@ class SerialTesterApp(tk.Tk):
         all_buttons.grid(row=1, column=0, sticky="e", pady=(6, 0))
         ttk.Button(all_buttons, text="Enable All Ports", command=self.enable_all_ports).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(all_buttons, text="Disable All Ports", command=self.disable_all_ports).pack(side=tk.LEFT)
+
+        global_serial = ttk.LabelFrame(right_controls, text="Global Serial Settings", padding=8)
+        global_serial.grid(row=0, column=1, rowspan=2, sticky="ns", padx=(16, 0))
+        global_serial.columnconfigure(1, weight=1)
+
+        ttk.Label(global_serial, text="Baudrate").grid(row=0, column=0, sticky="w", pady=2)
+        ttk.Entry(global_serial, textvariable=self.global_baudrate_var, width=10).grid(row=0, column=1, sticky="ew", pady=2)
+        ttk.Label(global_serial, text="Interval ms").grid(row=1, column=0, sticky="w", pady=2)
+        ttk.Entry(global_serial, textvariable=self.global_interval_var, width=10).grid(row=1, column=1, sticky="ew", pady=2)
+        ttk.Label(global_serial, text="Packet bytes").grid(row=2, column=0, sticky="w", pady=2)
+        ttk.Entry(global_serial, textvariable=self.global_packet_size_var, width=10).grid(row=2, column=1, sticky="ew", pady=2)
+        ttk.Button(
+            global_serial,
+            text="Apply To All Channels",
+            command=self.apply_global_serial_settings,
+        ).grid(row=3, column=0, columnspan=2, sticky="ew", pady=(6, 0))
 
         panes = ttk.Panedwindow(parent, orient=tk.VERTICAL)
         panes.grid(row=1, column=0, sticky="nsew")
@@ -1741,10 +2135,10 @@ class SerialTesterApp(tk.Tk):
 
         if new_rs232_count < old_rs232_count:
             for idx in sorted([i for i in self.rs232_workers if i >= new_rs232_count], reverse=True):
-                self.stop_single_test("rs232", idx, log_event=False)
+                self.stop_single_test("rs232", idx, log_event=False, refresh_health=False)
         if new_rs485_count < old_rs485_count:
             for idx in sorted([i for i in self.rs485_workers if i >= new_rs485_count], reverse=True):
-                self.stop_single_test("rs485", idx, log_event=False)
+                self.stop_single_test("rs485", idx, log_event=False, refresh_health=False)
 
         if new_rs232_count > old_rs232_count:
             for idx in range(old_rs232_count, new_rs232_count):
@@ -1802,17 +2196,6 @@ class SerialTesterApp(tk.Tk):
         if new_rs232_count == len(self.rs232_configs) and new_rs485_count == len(self.rs485_configs):
             return
 
-        if self.rs232_workers or self.rs485_workers:
-            answer = messagebox.askyesno(
-                "Stop tests?",
-                "Applying new channel counts will stop running tests. Continue?",
-            )
-            if not answer:
-                self.rs232_count_var.set(str(len(self.rs232_configs)))
-                self.rs485_count_var.set(str(len(self.rs485_configs)))
-                return
-            self.stop_all_tests()
-
         reduced = new_rs232_count < len(self.rs232_configs) or new_rs485_count < len(self.rs485_configs)
         if reduced:
             answer = messagebox.askyesno(
@@ -1823,6 +2206,17 @@ class SerialTesterApp(tk.Tk):
                 self.rs232_count_var.set(str(len(self.rs232_configs)))
                 self.rs485_count_var.set(str(len(self.rs485_configs)))
                 return
+
+        if self.rs232_workers or self.rs485_workers:
+            answer = messagebox.askyesno(
+                "Stop tests?",
+                "Applying new channel counts will stop running tests. Continue?",
+            )
+            if not answer:
+                self.rs232_count_var.set(str(len(self.rs232_configs)))
+                self.rs485_count_var.set(str(len(self.rs485_configs)))
+                return
+            self.stop_all_tests()
 
         self._apply_resized_channels(new_rs232_count, new_rs485_count)
         self.save_settings(show_message=False)
@@ -1842,15 +2236,19 @@ class SerialTesterApp(tk.Tk):
             if enabled:
                 self.refresh_rs232_row(idx)
             else:
-                self.stop_single_test("rs232", idx, log_event=False)
+                self.stop_single_test("rs232", idx, log_event=False, refresh_health=False)
 
         for idx, cfg in enumerate(self.rs485_configs):
             cfg["enabled"] = enabled
             if enabled:
                 self.refresh_rs485_row(idx)
             else:
-                self.stop_single_test("rs485", idx, log_event=False)
+                self.stop_single_test("rs485", idx, log_event=False, refresh_health=False)
 
+        self.active_preset_idx = None
+        self.ui_settings["active_preset_idx"] = None
+        self._rebuild_overview_rows()
+        self._refresh_health_panel()
         self._on_rs232_settings_select(None)
         self._on_rs485_settings_select(None)
         self.save_settings(show_message=False)
@@ -1861,6 +2259,120 @@ class SerialTesterApp(tk.Tk):
 
     def disable_all_ports(self) -> None:
         self._set_all_ports_enabled(False)
+
+    def _read_global_serial_settings(self) -> dict:
+        try:
+            baudrate = int(self.global_baudrate_var.get().strip())
+        except ValueError as exc:
+            raise ValueError("Global baudrate must be a whole number.") from exc
+        if baudrate <= 0:
+            raise ValueError("Global baudrate must be positive.")
+
+        try:
+            interval_ms = int(self.global_interval_var.get().strip())
+        except ValueError as exc:
+            raise ValueError("Global interval must be a whole number.") from exc
+        if interval_ms < MIN_INTERVAL_MS:
+            raise ValueError(f"Global interval must be at least {MIN_INTERVAL_MS} ms.")
+
+        try:
+            packet_size = int(self.global_packet_size_var.get().strip())
+        except ValueError as exc:
+            raise ValueError("Global packet size must be a whole number of bytes.") from exc
+        if not (MIN_PACKET_SIZE_BYTES <= packet_size <= MAX_PACKET_SIZE_BYTES):
+            raise ValueError(
+                f"Global packet size must be between {MIN_PACKET_SIZE_BYTES} and {MAX_PACKET_SIZE_BYTES} bytes."
+            )
+
+        return {
+            "baudrate": baudrate,
+            "interval_ms": interval_ms,
+            "packet_size": packet_size,
+            "rs232_payload_hex": payload_hex_for_size(RS232_PAYLOAD_PATTERN_HEX, packet_size),
+            "rs485_payload_hex": payload_hex_for_size(RS485_PAYLOAD_PATTERN_HEX, packet_size),
+        }
+
+    def apply_global_serial_settings(self) -> None:
+        try:
+            values = self._read_global_serial_settings()
+        except ValueError as exc:
+            messagebox.showerror("Invalid global serial settings", str(exc))
+            return
+
+        running_rs232 = sorted(self.rs232_workers)
+        running_rs485 = sorted(self.rs485_workers)
+        restart_text = ""
+        if running_rs232 or running_rs485:
+            restart_text = "\n\nRunning tests will be restarted with the new settings."
+
+        answer = messagebox.askyesno(
+            "Apply global serial settings",
+            (
+                "Apply baudrate, interval, and packet size to all RS232 and RS485 channels while keeping "
+                f"names, ports, parity, stopbits, and timeouts unchanged?{restart_text}"
+            ),
+        )
+        if not answer:
+            return
+
+        for idx in running_rs232:
+            self.stop_single_test("rs232", idx, log_event=False, refresh_health=False)
+        for idx in running_rs485:
+            self.stop_single_test("rs485", idx, log_event=False, refresh_health=False)
+
+        for idx, cfg in enumerate(self.rs232_configs):
+            cfg.update(
+                {
+                    "baudrate": values["baudrate"],
+                    "payload_hex": values["rs232_payload_hex"],
+                    "interval_ms": values["interval_ms"],
+                }
+            )
+            self.refresh_rs232_row(idx)
+
+        for idx, cfg in enumerate(self.rs485_configs):
+            cfg.update(
+                {
+                    "baudrate": values["baudrate"],
+                    "payload_hex": values["rs485_payload_hex"],
+                    "interval_ms": values["interval_ms"],
+                }
+            )
+            self.refresh_rs485_row(idx)
+
+        self.ui_settings["global_baudrate"] = values["baudrate"]
+        self.ui_settings["global_interval_ms"] = values["interval_ms"]
+        self.ui_settings["global_packet_size_bytes"] = values["packet_size"]
+
+        for idx in running_rs232:
+            if 0 <= idx < len(self.rs232_configs) and self._is_rs232_startable(idx):
+                self.start_single_test(
+                    "rs232",
+                    idx,
+                    startup_delay_s=0.0,
+                    reset_counts=False,
+                    log_event=False,
+                    refresh_health=False,
+                )
+        for idx in running_rs485:
+            if 0 <= idx < len(self.rs485_configs) and self._is_rs485_startable(idx):
+                self.start_single_test(
+                    "rs485",
+                    idx,
+                    startup_delay_s=0.0,
+                    reset_counts=False,
+                    log_event=False,
+                    refresh_health=False,
+                )
+
+        self._on_rs232_settings_select(None)
+        self._on_rs485_settings_select(None)
+        self.save_settings(show_message=False)
+        self._refresh_health_panel()
+        self.append_log(
+            "Applied global serial settings "
+            f"(baudrate={values['baudrate']}, interval={values['interval_ms']} ms, packet={values['packet_size']} bytes)."
+        )
 
     def _build_rs232_settings_section(self, parent: ttk.Frame) -> None:
         parent.columnconfigure(0, weight=3)
@@ -1917,13 +2429,13 @@ class SerialTesterApp(tk.Tk):
         self.rs232_var_enabled = tk.BooleanVar(value=True)
         self.rs232_var_name = tk.StringVar()
         self.rs232_var_port = tk.StringVar()
-        self.rs232_var_baud = tk.StringVar(value="9600")
+        self.rs232_var_baud = tk.StringVar(value=str(DEFAULT_BAUDRATE))
         self.rs232_var_bytesize = tk.StringVar(value="8")
         self.rs232_var_parity = tk.StringVar(value="N")
         self.rs232_var_stopbits = tk.StringVar(value="1")
         self.rs232_var_timeout = tk.StringVar(value="0.5")
-        self.rs232_var_payload = tk.StringVar(value="55AA")
-        self.rs232_var_interval = tk.StringVar(value="100")
+        self.rs232_var_payload = tk.StringVar(value=DEFAULT_RS232_PAYLOAD_HEX)
+        self.rs232_var_interval = tk.StringVar(value=str(DEFAULT_INTERVAL_MS))
 
         row = 0
         ttk.Checkbutton(editor, text="Enabled", variable=self.rs232_var_enabled).grid(row=row, column=0, columnspan=2, sticky="w")
@@ -2032,13 +2544,13 @@ class SerialTesterApp(tk.Tk):
         self.rs485_var_name = tk.StringVar()
         self.rs485_var_sender = tk.StringVar()
         self.rs485_var_echo = tk.StringVar()
-        self.rs485_var_baud = tk.StringVar(value="9600")
+        self.rs485_var_baud = tk.StringVar(value=str(DEFAULT_BAUDRATE))
         self.rs485_var_bytesize = tk.StringVar(value="8")
         self.rs485_var_parity = tk.StringVar(value="N")
         self.rs485_var_stopbits = tk.StringVar(value="1")
         self.rs485_var_timeout = tk.StringVar(value="0.5")
-        self.rs485_var_payload = tk.StringVar(value="A55A")
-        self.rs485_var_interval = tk.StringVar(value="100")
+        self.rs485_var_payload = tk.StringVar(value=DEFAULT_RS485_PAYLOAD_HEX)
+        self.rs485_var_interval = tk.StringVar(value=str(DEFAULT_INTERVAL_MS))
 
         row = 0
         ttk.Checkbutton(editor, text="Enabled", variable=self.rs485_var_enabled).grid(row=row, column=0, columnspan=2, sticky="w")
@@ -2136,73 +2648,91 @@ class SerialTesterApp(tk.Tk):
             self.rs485_settings_tree.selection_set("s485_0")
             self._on_rs485_settings_select(None)
 
-    def refresh_rs232_row(self, idx: int) -> None:
+    def refresh_rs232_row(
+        self,
+        idx: int,
+        include_settings: bool = True,
+        include_monitor: bool = True,
+        include_overview: bool = True,
+    ) -> None:
         cfg = self.rs232_configs[idx]
         state = self.rs232_state[idx]
 
-        self.rs232_tree.item(
-            f"m232_{idx}",
-            values=(
-                idx + 1,
-                "Yes" if cfg["enabled"] else "No",
-                cfg["name"],
-                cfg["port"],
-                state["status"],
-                state["pass_count"],
-                state["fail_count"],
-                state["last"],
-            ),
-        )
+        if include_monitor:
+            self.rs232_tree.item(
+                f"m232_{idx}",
+                values=(
+                    idx + 1,
+                    "Yes" if cfg["enabled"] else "No",
+                    cfg["name"],
+                    cfg["port"],
+                    state["status"],
+                    state["pass_count"],
+                    state["fail_count"],
+                    state["last"],
+                ),
+            )
 
-        self.rs232_settings_tree.item(
-            f"s232_{idx}",
-            values=(
-                idx + 1,
-                "Yes" if cfg["enabled"] else "No",
-                cfg["name"],
-                cfg["port"],
-                cfg["baudrate"],
-                cfg["payload_hex"],
-                cfg["interval_ms"],
-                cfg["timeout_s"],
-            ),
-        )
-        self._refresh_overview_row("rs232", idx)
+        if include_settings:
+            self.rs232_settings_tree.item(
+                f"s232_{idx}",
+                values=(
+                    idx + 1,
+                    "Yes" if cfg["enabled"] else "No",
+                    cfg["name"],
+                    cfg["port"],
+                    cfg["baudrate"],
+                    cfg["payload_hex"],
+                    cfg["interval_ms"],
+                    cfg["timeout_s"],
+                ),
+            )
+        if include_overview:
+            self._refresh_overview_row("rs232", idx)
 
-    def refresh_rs485_row(self, idx: int) -> None:
+    def refresh_rs485_row(
+        self,
+        idx: int,
+        include_settings: bool = True,
+        include_monitor: bool = True,
+        include_overview: bool = True,
+    ) -> None:
         cfg = self.rs485_configs[idx]
         state = self.rs485_state[idx]
 
-        self.rs485_tree.item(
-            f"m485_{idx}",
-            values=(
-                idx + 1,
-                "Yes" if cfg["enabled"] else "No",
-                cfg["name"],
-                cfg["sender_port"],
-                cfg["echo_port"],
-                state["status"],
-                state["pass_count"],
-                state["fail_count"],
-                state["last"],
-            ),
-        )
+        if include_monitor:
+            self.rs485_tree.item(
+                f"m485_{idx}",
+                values=(
+                    idx + 1,
+                    "Yes" if cfg["enabled"] else "No",
+                    cfg["name"],
+                    cfg["sender_port"],
+                    cfg["echo_port"],
+                    state["status"],
+                    state["pass_count"],
+                    state["fail_count"],
+                    state["last"],
+                ),
+            )
 
-        self.rs485_settings_tree.item(
-            f"s485_{idx}",
-            values=(
-                idx + 1,
-                "Yes" if cfg["enabled"] else "No",
-                cfg["name"],
-                cfg["sender_port"],
-                cfg["echo_port"],
-                cfg["baudrate"],
-                cfg["payload_hex"],
-                cfg["interval_ms"],
-                cfg["timeout_s"],
-            ),
-        )
-        self._refresh_overview_row("rs485", idx)
+        if include_settings:
+            self.rs485_settings_tree.item(
+                f"s485_{idx}",
+                values=(
+                    idx + 1,
+                    "Yes" if cfg["enabled"] else "No",
+                    cfg["name"],
+                    cfg["sender_port"],
+                    cfg["echo_port"],
+                    cfg["baudrate"],
+                    cfg["payload_hex"],
+                    cfg["interval_ms"],
+                    cfg["timeout_s"],
+                ),
+            )
+        if include_overview:
+            self._refresh_overview_row("rs485", idx)
 
     def _selected_index(self, tree: ttk.Treeview, prefix: str) -> int | None:
         selected = tree.selection()
@@ -2263,12 +2793,12 @@ class SerialTesterApp(tk.Tk):
         stopbits = parse_stopbits(self.rs232_var_stopbits.get())
 
         timeout_s = float(self.rs232_var_timeout.get().strip())
-        if timeout_s <= 0:
+        if not math.isfinite(timeout_s) or timeout_s <= 0:
             raise ValueError("Timeout must be greater than 0.")
 
         interval_ms = int(self.rs232_var_interval.get().strip())
-        if interval_ms < 50:
-            raise ValueError("Interval must be at least 50 ms.")
+        if interval_ms < MIN_INTERVAL_MS:
+            raise ValueError(f"Interval must be at least {MIN_INTERVAL_MS} ms.")
 
         payload_hex = validate_hex_payload(self.rs232_var_payload.get())
 
@@ -2299,6 +2829,9 @@ class SerialTesterApp(tk.Tk):
             return
 
         cfg = self.rs232_configs[idx]
+        worker_config_before = {key: cfg.get(key) for key in RS232_WORKER_CONFIG_KEYS}
+        was_running = idx in self.rs232_workers
+        old_name = cfg["name"]
         cfg.update(
             {
                 "name": name,
@@ -2306,9 +2839,26 @@ class SerialTesterApp(tk.Tk):
                 **common_values,
             }
         )
+        self._replace_preset_name_reference(old_name, name)
 
-        self._stop_rs232_worker_if_disabled(idx)
+        worker_config_changed = any(cfg.get(key) != worker_config_before[key] for key in RS232_WORKER_CONFIG_KEYS)
+        if was_running and worker_config_changed:
+            self.stop_single_test("rs232", idx, log_event=False, refresh_health=False)
+            if self._is_rs232_startable(idx):
+                self.start_single_test(
+                    "rs232",
+                    idx,
+                    startup_delay_s=0.0,
+                    reset_counts=False,
+                    log_event=False,
+                    refresh_health=False,
+                )
+        else:
+            self._stop_rs232_worker_if_disabled(idx)
         self.refresh_rs232_row(idx)
+        self._refresh_preset_name_options(show_message=False)
+        self._rebuild_overview_rows()
+        self._queue_health_refresh()
         self.save_settings(show_message=False)
         self.append_log(f"RS232 #{idx + 1} settings updated.")
 
@@ -2326,11 +2876,33 @@ class SerialTesterApp(tk.Tk):
         if not answer:
             return
 
+        running_indices = set(self.rs232_workers)
+        changed_running_indices: list[int] = []
         for idx, cfg in enumerate(self.rs232_configs):
+            worker_config_before = {key: cfg.get(key) for key in RS232_WORKER_CONFIG_KEYS}
             cfg.update(common_values)
-            self._stop_rs232_worker_if_disabled(idx)
+            if idx in running_indices and any(
+                cfg.get(key) != worker_config_before[key] for key in RS232_WORKER_CONFIG_KEYS
+            ):
+                changed_running_indices.append(idx)
+            else:
+                self._stop_rs232_worker_if_disabled(idx)
             self.refresh_rs232_row(idx)
 
+        for idx in changed_running_indices:
+            self.stop_single_test("rs232", idx, log_event=False, refresh_health=False)
+        for idx in changed_running_indices:
+            if self._is_rs232_startable(idx):
+                self.start_single_test(
+                    "rs232",
+                    idx,
+                    startup_delay_s=0.0,
+                    reset_counts=False,
+                    log_event=False,
+                    refresh_health=False,
+                )
+
+        self._queue_health_refresh()
         self.save_settings(show_message=False)
         self.append_log("Applied RS232 common settings to all ports (Name/Port kept).")
 
@@ -2340,7 +2912,7 @@ class SerialTesterApp(tk.Tk):
         if not is_disabled:
             return
 
-        self.stop_single_test("rs232", idx, log_event=False)
+        self.stop_single_test("rs232", idx, log_event=False, refresh_health=False)
 
     def _read_rs485_common_editor_values(self) -> dict:
         baudrate = int(self.rs485_var_baud.get().strip())
@@ -2358,12 +2930,12 @@ class SerialTesterApp(tk.Tk):
         stopbits = parse_stopbits(self.rs485_var_stopbits.get())
 
         timeout_s = float(self.rs485_var_timeout.get().strip())
-        if timeout_s <= 0:
+        if not math.isfinite(timeout_s) or timeout_s <= 0:
             raise ValueError("Timeout must be greater than 0.")
 
         interval_ms = int(self.rs485_var_interval.get().strip())
-        if interval_ms < 50:
-            raise ValueError("Interval must be at least 50 ms.")
+        if interval_ms < MIN_INTERVAL_MS:
+            raise ValueError(f"Interval must be at least {MIN_INTERVAL_MS} ms.")
 
         payload_hex = validate_hex_payload(self.rs485_var_payload.get())
 
@@ -2395,6 +2967,9 @@ class SerialTesterApp(tk.Tk):
             return
 
         cfg = self.rs485_configs[idx]
+        worker_config_before = {key: cfg.get(key) for key in RS485_WORKER_CONFIG_KEYS}
+        was_running = idx in self.rs485_workers
+        old_name = cfg["name"]
         cfg.update(
             {
                 "name": name,
@@ -2403,9 +2978,26 @@ class SerialTesterApp(tk.Tk):
                 **common_values,
             }
         )
+        self._replace_preset_name_reference(old_name, name)
 
-        self._stop_rs485_worker_if_disabled(idx)
+        worker_config_changed = any(cfg.get(key) != worker_config_before[key] for key in RS485_WORKER_CONFIG_KEYS)
+        if was_running and worker_config_changed:
+            self.stop_single_test("rs485", idx, log_event=False, refresh_health=False)
+            if self._is_rs485_startable(idx):
+                self.start_single_test(
+                    "rs485",
+                    idx,
+                    startup_delay_s=0.0,
+                    reset_counts=False,
+                    log_event=False,
+                    refresh_health=False,
+                )
+        else:
+            self._stop_rs485_worker_if_disabled(idx)
         self.refresh_rs485_row(idx)
+        self._refresh_preset_name_options(show_message=False)
+        self._rebuild_overview_rows()
+        self._queue_health_refresh()
         self.save_settings(show_message=False)
         self.append_log(f"RS485 Pair #{idx + 1} settings updated.")
 
@@ -2423,11 +3015,33 @@ class SerialTesterApp(tk.Tk):
         if not answer:
             return
 
+        running_indices = set(self.rs485_workers)
+        changed_running_indices: list[int] = []
         for idx, cfg in enumerate(self.rs485_configs):
+            worker_config_before = {key: cfg.get(key) for key in RS485_WORKER_CONFIG_KEYS}
             cfg.update(common_values)
-            self._stop_rs485_worker_if_disabled(idx)
+            if idx in running_indices and any(
+                cfg.get(key) != worker_config_before[key] for key in RS485_WORKER_CONFIG_KEYS
+            ):
+                changed_running_indices.append(idx)
+            else:
+                self._stop_rs485_worker_if_disabled(idx)
             self.refresh_rs485_row(idx)
 
+        for idx in changed_running_indices:
+            self.stop_single_test("rs485", idx, log_event=False, refresh_health=False)
+        for idx in changed_running_indices:
+            if self._is_rs485_startable(idx):
+                self.start_single_test(
+                    "rs485",
+                    idx,
+                    startup_delay_s=0.0,
+                    reset_counts=False,
+                    log_event=False,
+                    refresh_health=False,
+                )
+
+        self._queue_health_refresh()
         self.save_settings(show_message=False)
         self.append_log("Applied RS485 common settings to all pairs (Name/Ports kept).")
 
@@ -2438,7 +3052,7 @@ class SerialTesterApp(tk.Tk):
         if not is_disabled:
             return
 
-        self.stop_single_test("rs485", idx, log_event=False)
+        self.stop_single_test("rs485", idx, log_event=False, refresh_health=False)
 
     def _is_rs232_startable(self, idx: int) -> bool:
         cfg = self.rs232_configs[idx]
@@ -2460,6 +3074,7 @@ class SerialTesterApp(tk.Tk):
         startup_delay_s: float | None = None,
         reset_counts: bool = True,
         log_event: bool = True,
+        refresh_health: bool = True,
     ) -> None:
         delay = self._resolved_startup_delay(startup_delay_s)
 
@@ -2467,20 +3082,23 @@ class SerialTesterApp(tk.Tk):
             if idx in self.rs232_workers:
                 worker = self.rs232_workers.pop(idx)
                 worker.stop()
-                worker.join(timeout=0.3)
+                worker.join(timeout=WORKER_JOIN_TIMEOUT_S)
 
             cfg = self.rs232_configs[idx]
             state = self.rs232_state[idx]
             if reset_counts:
                 state["pass_count"] = 0
                 state["fail_count"] = 0
+                state["error_count"] = 0
 
             if self._is_rs232_startable(idx):
                 state["status"] = "Starting"
                 state["last"] = "Waiting for worker"
                 worker_cfg = cfg.copy()
                 worker_cfg["startup_delay_s"] = delay
-                worker = RS232Worker(idx, worker_cfg, self.event_queue)
+                worker_id = self.next_worker_id
+                self.next_worker_id += 1
+                worker = RS232Worker(idx, worker_cfg, self.event_queue, worker_id=worker_id)
                 self.rs232_workers[idx] = worker
                 worker.start()
                 if log_event:
@@ -2491,26 +3109,29 @@ class SerialTesterApp(tk.Tk):
                 if log_event:
                     self.append_log(f"RS232 #{idx + 1} not started ({state['last']}).")
 
-            self.refresh_rs232_row(idx)
+            self.refresh_rs232_row(idx, include_settings=False)
 
         elif group == "rs485":
             if idx in self.rs485_workers:
                 worker = self.rs485_workers.pop(idx)
                 worker.stop()
-                worker.join(timeout=0.3)
+                worker.join(timeout=WORKER_JOIN_TIMEOUT_S)
 
             cfg = self.rs485_configs[idx]
             state = self.rs485_state[idx]
             if reset_counts:
                 state["pass_count"] = 0
                 state["fail_count"] = 0
+                state["error_count"] = 0
 
             if self._is_rs485_startable(idx):
                 state["status"] = "Starting"
                 state["last"] = "Waiting for worker"
                 worker_cfg = cfg.copy()
                 worker_cfg["startup_delay_s"] = delay
-                worker = RS485PairWorker(idx, worker_cfg, self.event_queue)
+                worker_id = self.next_worker_id
+                self.next_worker_id += 1
+                worker = RS485PairWorker(idx, worker_cfg, self.event_queue, worker_id=worker_id)
                 self.rs485_workers[idx] = worker
                 worker.start()
                 if log_event:
@@ -2521,18 +3142,19 @@ class SerialTesterApp(tk.Tk):
                 if log_event:
                     self.append_log(f"RS485 Pair #{idx + 1} not started ({state['last']}).")
 
-            self.refresh_rs485_row(idx)
+            self.refresh_rs485_row(idx, include_settings=False)
         else:
             raise ValueError(f"Unsupported group: {group}")
 
-        self._refresh_health_panel()
+        if refresh_health:
+            self._refresh_health_panel()
 
-    def stop_single_test(self, group: str, idx: int, log_event: bool = True) -> None:
+    def stop_single_test(self, group: str, idx: int, log_event: bool = True, refresh_health: bool = True) -> None:
         if group == "rs232":
             worker = self.rs232_workers.pop(idx, None)
             if worker is not None:
                 worker.stop()
-                worker.join(timeout=0.3)
+                worker.join(timeout=WORKER_JOIN_TIMEOUT_S)
 
             cfg = self.rs232_configs[idx]
             state = self.rs232_state[idx]
@@ -2550,7 +3172,7 @@ class SerialTesterApp(tk.Tk):
             worker = self.rs485_workers.pop(idx, None)
             if worker is not None:
                 worker.stop()
-                worker.join(timeout=0.3)
+                worker.join(timeout=WORKER_JOIN_TIMEOUT_S)
 
             cfg = self.rs485_configs[idx]
             state = self.rs485_state[idx]
@@ -2566,7 +3188,8 @@ class SerialTesterApp(tk.Tk):
         else:
             raise ValueError(f"Unsupported group: {group}")
 
-        self._refresh_health_panel()
+        if refresh_health:
+            self._refresh_health_panel()
 
     def start_all_tests(self, startup_delay_s: float | None = None) -> None:
         self.start_rs232_tests(startup_delay_s=startup_delay_s)
@@ -2579,100 +3202,220 @@ class SerialTesterApp(tk.Tk):
     def start_rs232_tests(self, startup_delay_s: float | None = None) -> None:
         self.stop_rs232_tests()
         for idx in range(len(self.rs232_configs)):
-            self.start_single_test("rs232", idx, startup_delay_s=startup_delay_s, reset_counts=True, log_event=False)
+            self.start_single_test(
+                "rs232",
+                idx,
+                startup_delay_s=startup_delay_s,
+                reset_counts=True,
+                log_event=False,
+                refresh_health=False,
+            )
 
+        self._refresh_health_panel()
         self.append_log("RS232 test workers started.")
 
     def stop_rs232_tests(self) -> None:
         if not self.rs232_workers:
             return
 
+        for worker in self.rs232_workers.values():
+            worker.stop()
         for idx in list(self.rs232_workers.keys()):
-            self.stop_single_test("rs232", idx, log_event=False)
+            self.stop_single_test("rs232", idx, log_event=False, refresh_health=False)
 
+        self._refresh_health_panel()
         self.append_log("RS232 test workers stopped.")
 
     def start_rs485_tests(self, startup_delay_s: float | None = None) -> None:
         self.stop_rs485_tests()
         for idx in range(len(self.rs485_configs)):
-            self.start_single_test("rs485", idx, startup_delay_s=startup_delay_s, reset_counts=True, log_event=False)
+            self.start_single_test(
+                "rs485",
+                idx,
+                startup_delay_s=startup_delay_s,
+                reset_counts=True,
+                log_event=False,
+                refresh_health=False,
+            )
 
+        self._refresh_health_panel()
         self.append_log("RS485 pair workers started.")
 
     def stop_rs485_tests(self) -> None:
         if not self.rs485_workers:
             return
 
+        for worker in self.rs485_workers.values():
+            worker.stop()
         for idx in list(self.rs485_workers.keys()):
-            self.stop_single_test("rs485", idx, log_event=False)
+            self.stop_single_test("rs485", idx, log_event=False, refresh_health=False)
 
+        self._refresh_health_panel()
         self.append_log("RS485 pair workers stopped.")
 
+    def _queue_live_refresh(self, group: str, idx: int) -> None:
+        if group == "rs232":
+            self.pending_rs232_refreshes.add(idx)
+        elif group == "rs485":
+            self.pending_rs485_refreshes.add(idx)
+        self.pending_health_refresh = True
+        self._schedule_render_flush()
+
+    def _queue_health_refresh(self) -> None:
+        self.pending_health_refresh = True
+        self._schedule_render_flush()
+
+    def _schedule_render_flush(self) -> None:
+        if self.ui_refresh_after_id is not None:
+            return
+        self.ui_refresh_after_id = self.after(UI_RENDER_INTERVAL_MS, self._flush_pending_ui_refreshes)
+
+    def _flush_pending_ui_refreshes(self) -> None:
+        self.ui_refresh_after_id = None
+        if self.window_motion_active:
+            return
+
+        rs232_indices = sorted(self.pending_rs232_refreshes)
+        rs485_indices = sorted(self.pending_rs485_refreshes)
+        refresh_health = self.pending_health_refresh
+        self.pending_rs232_refreshes.clear()
+        self.pending_rs485_refreshes.clear()
+        self.pending_health_refresh = False
+
+        active_tab = self._active_tab_text()
+        if active_tab == "Overview":
+            for idx in rs232_indices:
+                if 0 <= idx < len(self.rs232_configs):
+                    self._refresh_overview_row("rs232", idx)
+            for idx in rs485_indices:
+                if 0 <= idx < len(self.rs485_configs):
+                    self._refresh_overview_row("rs485", idx)
+        elif active_tab == "RS232 Monitor":
+            for idx in rs232_indices:
+                if 0 <= idx < len(self.rs232_configs):
+                    self.refresh_rs232_row(
+                        idx,
+                        include_settings=False,
+                        include_overview=False,
+                    )
+        elif active_tab == "RS485 Monitor":
+            for idx in rs485_indices:
+                if 0 <= idx < len(self.rs485_configs):
+                    self.refresh_rs485_row(
+                        idx,
+                        include_settings=False,
+                        include_overview=False,
+                    )
+
+        if refresh_health and active_tab in {"Overview", "Health"}:
+            self._refresh_health_panel(include_issue_tree=(active_tab == "Health"))
+        if active_tab == "Log" and self.rendered_log_version != self.log_version:
+            self._render_log_history()
+
     def _process_worker_events(self) -> None:
-        while True:
+        processed_count = 0
+        event_limit = (
+            MAX_WORKER_EVENTS_DURING_WINDOW_MOTION if self.window_motion_active else MAX_WORKER_EVENTS_PER_POLL
+        )
+        while processed_count < event_limit:
             try:
                 event = self.event_queue.get_nowait()
             except queue.Empty:
                 break
+            processed_count += 1
 
             group = event.get("group")
             idx = int(event.get("index", -1))
+            worker_id = int(event.get("worker_id", -1))
             status = str(event.get("status", ""))
             last = str(event.get("last", ""))
             pass_inc = int(event.get("pass_inc", 0))
             fail_inc = int(event.get("fail_inc", 0))
+            error_inc = int(event.get("error_inc", 0))
             log = bool(event.get("log", False))
 
             if group == "rs232" and 0 <= idx < len(self.rs232_state):
+                current_worker = self.rs232_workers.get(idx)
+                if current_worker is None or current_worker.worker_id != worker_id:
+                    continue
                 state = self.rs232_state[idx]
                 previous_status = state["status"]
                 if status:
                     state["status"] = status
                 state["pass_count"] += pass_inc
                 state["fail_count"] += fail_inc
+                state["error_count"] += error_inc
                 if last:
                     state["last"] = last
                 if fail_inc > 0:
                     self._record_failure_event()
                 self._record_fault_transition("rs232", idx, previous_status, state["status"], state["last"])
-                self.refresh_rs232_row(idx)
+                self._queue_live_refresh("rs232", idx)
                 if log:
-                    self.append_log(f"RS232 #{idx + 1}: {status} - {last}")
+                    self._append_worker_event_log("rs232", idx, status, last)
+                if status == "Stopped":
+                    self.rs232_workers.pop(idx, None)
 
             if group == "rs485" and 0 <= idx < len(self.rs485_state):
+                current_worker = self.rs485_workers.get(idx)
+                if current_worker is None or current_worker.worker_id != worker_id:
+                    continue
                 state = self.rs485_state[idx]
                 previous_status = state["status"]
                 if status:
                     state["status"] = status
                 state["pass_count"] += pass_inc
                 state["fail_count"] += fail_inc
+                state["error_count"] += error_inc
                 if last:
                     state["last"] = last
                 if fail_inc > 0:
                     self._record_failure_event()
                 self._record_fault_transition("rs485", idx, previous_status, state["status"], state["last"])
-                self.refresh_rs485_row(idx)
+                self._queue_live_refresh("rs485", idx)
                 if log:
-                    self.append_log(f"RS485 Pair #{idx + 1}: {status} - {last}")
+                    self._append_worker_event_log("rs485", idx, status, last)
+                if status == "Stopped":
+                    self.rs485_workers.pop(idx, None)
 
-        self._refresh_health_panel()
-        self.after(100, self._process_worker_events)
+        delay_ms = WORKER_EVENT_POLL_MS if self.window_motion_active or processed_count < event_limit else 1
+        self.after(delay_ms, self._process_worker_events)
+
+    def _append_worker_event_log(self, group: str, idx: int, status: str, last: str) -> None:
+        label = f"RS232 #{idx + 1}" if group == "rs232" else f"RS485 Pair #{idx + 1}"
+        if status != "FAIL":
+            self.append_log(f"{label}: {status} - {last}")
+            return
+
+        key = (group, idx)
+        now = time.monotonic()
+        previous = self.last_failure_log_at.get(key, 0.0)
+        if now - previous < 1.0:
+            self.suppressed_failure_logs[key] = self.suppressed_failure_logs.get(key, 0) + 1
+            return
+
+        suppressed = self.suppressed_failure_logs.pop(key, 0)
+        suffix = f" ({suppressed} repeated failures suppressed)" if suppressed else ""
+        self.last_failure_log_at[key] = now
+        self.append_log(f"{label}: {status} - {last}{suffix}")
+
+    def _render_log_history(self) -> None:
+        if not hasattr(self, "log_text") or self.window_motion_active:
+            return
+        self.log_text.configure(state=tk.NORMAL)
+        self.log_text.delete("1.0", tk.END)
+        self.log_text.insert(tk.END, "".join(self.log_lines))
+        self.log_text.see(tk.END)
+        self.log_text.configure(state=tk.DISABLED)
+        self.rendered_log_version = self.log_version
 
     def append_log(self, message: str) -> None:
         stamp = time.strftime("%H:%M:%S")
         line = f"[{stamp}] {message}\n"
-
-        self.log_text.configure(state=tk.NORMAL)
-        self.log_text.insert(tk.END, line)
-        self.log_text.see(tk.END)
-        self.log_text.configure(state=tk.DISABLED)
-
-        self.log_line_count += 1
-        if self.log_line_count > 1200:
-            self.log_text.configure(state=tk.NORMAL)
-            self.log_text.delete("1.0", "101.0")
-            self.log_text.configure(state=tk.DISABLED)
-            self.log_line_count -= 100
+        self.log_lines.append(line)
+        self.log_version += 1
+        if self._active_tab_text() == "Log":
+            self._schedule_render_flush()
 
     def save_settings(self, show_message: bool = True) -> bool:
         self._sync_presets_from_ui()
@@ -2680,6 +3423,19 @@ class SerialTesterApp(tk.Tk):
         self.ui_settings["auto_start_after_launch_2s"] = bool(self.auto_start_launch_var.get())
         self.ui_settings["delay_comm_start_2s"] = bool(self.delay_comm_start_var.get())
         self.ui_settings["overview_compact_view"] = bool(self.overview_compact_var.get())
+        self.ui_settings["overview_hide_non_preset_ports"] = bool(self.overview_hide_non_preset_ports_var.get())
+        self.ui_settings["active_preset_idx"] = self.active_preset_idx
+        self.ui_settings["global_baudrate"] = max(as_int(self.global_baudrate_var.get(), DEFAULT_BAUDRATE), 1)
+        self.ui_settings["global_interval_ms"] = max(
+            as_int(self.global_interval_var.get(), DEFAULT_INTERVAL_MS),
+            MIN_INTERVAL_MS,
+        )
+        self.ui_settings["global_packet_size_bytes"] = normalize_count(
+            self.global_packet_size_var.get(),
+            DEFAULT_PACKET_SIZE_BYTES,
+            MIN_PACKET_SIZE_BYTES,
+            MAX_PACKET_SIZE_BYTES,
+        )
         self.ui_settings["rs232_count"] = len(self.rs232_configs)
         self.ui_settings["rs485_pair_count"] = len(self.rs485_configs)
         self.ui_settings["presets"] = self.preset_configs
@@ -2717,8 +3473,18 @@ class SerialTesterApp(tk.Tk):
         self.auto_start_launch_var.set(bool(self.ui_settings.get("auto_start_after_launch_2s", True)))
         self.delay_comm_start_var.set(bool(self.ui_settings.get("delay_comm_start_2s", True)))
         self.overview_compact_var.set(bool(self.ui_settings.get("overview_compact_view", True)))
+        self.overview_hide_non_preset_ports_var.set(bool(self.ui_settings.get("overview_hide_non_preset_ports", False)))
+        self.global_baudrate_var.set(str(self.ui_settings.get("global_baudrate", DEFAULT_BAUDRATE)))
+        self.global_interval_var.set(str(self.ui_settings.get("global_interval_ms", DEFAULT_INTERVAL_MS)))
+        self.global_packet_size_var.set(str(self.ui_settings.get("global_packet_size_bytes", DEFAULT_PACKET_SIZE_BYTES)))
         self.rs232_count_var.set(str(len(self.rs232_configs)))
         self.rs485_count_var.set(str(len(self.rs485_configs)))
+        self.active_preset_idx = self.ui_settings.get("active_preset_idx")
+        self.rs232_state = [self.new_state() for _ in self.rs232_configs]
+        self.rs485_state = [self.new_state() for _ in self.rs485_configs]
+        self.failure_counts.clear()
+        self.fault_records.clear()
+        self.channel_fault_history.clear()
         self._refresh_window_title()
         self._refresh_settings_section_titles()
         self._rebuild_overview_rows()
@@ -2727,12 +3493,7 @@ class SerialTesterApp(tk.Tk):
                 self.preset_name_vars[idx].set(self.preset_configs[idx]["name"])
         self.refresh_com_port_options(show_message=False)
         self._refresh_preset_button_labels()
-        self._refresh_preset_port_options(show_message=False)
-
-        self.rs232_state = [self.new_state() for _ in self.rs232_configs]
-        self.rs485_state = [self.new_state() for _ in self.rs485_configs]
-        self.failure_counts.clear()
-        self.channel_fault_history.clear()
+        self._refresh_preset_name_options(show_message=False)
 
         self._populate_tables()
         self._select_first_rows()

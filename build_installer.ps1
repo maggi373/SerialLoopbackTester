@@ -5,7 +5,7 @@ param(
 $ErrorActionPreference = "Stop"
 Set-Location -Path $PSScriptRoot
 
-$appVersion = "1.1.1"
+$appVersion = "1.2.0"
 $portableBaseName = "SerialLoopbackTester-v$appVersion-portable"
 $installerBaseName = "SerialLoopbackTester-v$appVersion-installer"
 
@@ -17,6 +17,7 @@ Write-Host "Building EXE with PyInstaller..."
 python -m PyInstaller `
     --noconfirm `
     --clean `
+    --noupx `
     --onefile `
     --windowed `
     --name $portableBaseName `

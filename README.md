@@ -1,22 +1,27 @@
 # Serial Loopback Tester
-Version: `1.1.1`  
+Version: `1.2.0`
 Made by: `maggi373`
 
 Python GUI tool for:
 - 40 RS232 loopback tests (same port send/receive)
 - 8 RS485 pair tests (sender -> receiver -> echo back -> sender verify)
 - Customizable RS232 and RS485 pair counts from Settings (defaults: 40 and 8) (MAX: 256 and 128)
-- Combined Overview page for all ports/pairs with color status bars
-- Overview supports compact 2-column row mode and 2-column card mode
+- Combined Overview page for all ports/pairs with color status bars and row outlines
+- Overview supports compact 2-column row mode, 2-column card mode, and optional preset filtering
+- Live worker updates are batched, hidden tabs are not redrawn, and rendering pauses while the window is moving/resizing
 - Health summary block in Overview (alarm, counts, and recent failures)
 - Health page with live alarm state and current FAIL/ERROR list
 - Fault Review page for PASS -> FAIL/ERROR transitions
-- 5 named presets (toolbar buttons) with per-preset COM port selection on the Presets page
-- Presets apply enable/disable states to channels based on selected COM ports
+- 5 named presets (toolbar buttons) with per-preset channel name selection on the Presets page
+- Presets apply enable/disable states to channels based on selected channel names
+- The last applied preset and Overview preset filter are restored on the next launch
 - Editable COM port mapping and custom port names
 - COM dropdowns (with manual typing allowed)
 - JSON settings file (`serial_tester_settings.json`)
-- Default test interval: 100 ms
+- Default test interval: 25 ms
+- Default baudrate: 19200
+- Default payload: 8 bytes
+- Global serial settings control for applying baudrate, test interval, and packet size to all channels
 - Fullscreen support (`Fullscreen` button, `F11` toggle, `Esc` exit)
 - Auto-start tests 2 seconds after launch (default ON)
 - Optional startup setting: launch in fullscreen by default
@@ -55,10 +60,11 @@ powershell -ExecutionPolicy Bypass -File .\build_installer.ps1
 ```
 The build script checks `ISCC.exe` in `PATH`, `%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe`, and standard Program Files locations.
 Installer includes an optional checkbox to start the app with Windows (Startup folder shortcut for the installing user).
+The default installation is per-user and does not require administrator elevation.
 
 Outputs:
-- Portable EXE: `dist\SerialLoopbackTester-v1.1.1-portable.exe`
-- Installer: `dist\installer\SerialLoopbackTester-v1.1.1-installer.exe`
+- Portable EXE: `dist\SerialLoopbackTester-v1.2.0-portable.exe`
+- Installer: `dist\installer\SerialLoopbackTester-v1.2.0-installer.exe`
 
 ## Usage
 1. Open the **Settings** tab.
@@ -68,6 +74,7 @@ Outputs:
 5. Start tests using **Start RS232**, **Start RS485**, or **Start All**.
 6. Use **Overview** tab to see all entries at once:
    - Use **Compact View (2 Columns)** to switch to the old compact row layout for 1920x1080 screens
+   - Use **Hide Non-Preset Ports** to show only the channel names selected by the last applied preset
    - Top health strip shows alarm state, fault log count, and live totals
    - Green bar = good message match
    - Purple bar = communication recovered after prior fault on that channel
@@ -83,17 +90,20 @@ Outputs:
 11. In **Settings > Application**, enable **Start application in fullscreen** if desired.
 12. In **Settings > Application**, keep **Delay communications startup by 2 seconds** enabled (default ON) to wait before first TX when starting tests manually.
 13. In **Settings > Application**, use **Enable All Ports** or **Disable All Ports** for a global channel state change.
-14. In **Settings > Application**, set **RS232 count** and **RS485 pair count**, then click **Apply Counts** to resize channels (defaults are 40 and 8).
-15. To disable a port completely, either uncheck **Enabled** or leave the port field blank. Blank ports are skipped.
-16. In **Edit Selected RS232 Port**, use **Apply To All RS232 (Keep Name/Port)** to copy serial settings to all RS232 rows while preserving each row's Name and Port.
-17. In **Edit Selected RS485 Pair**, use **Apply To All RS485 (Keep Name/Ports)** to copy serial settings to all RS485 pairs while preserving each pair's Name, Sender Port, and Echo Port.
-18. In **Presets**, set up each preset name and pick COM ports for that preset.
+14. In **Settings > Application**, use **Global Serial Settings** to apply baudrate, interval, and packet size to every RS232/RS485 channel.
+15. In **Settings > Application**, set **RS232 count** and **RS485 pair count**, then click **Apply Counts** to resize channels (defaults are 40 and 8).
+16. To disable a port completely, either uncheck **Enabled** or leave the port field blank. Blank ports are skipped.
+17. In **Edit Selected RS232 Port**, use **Apply To All RS232 (Keep Name/Port)** to copy serial settings to all RS232 rows while preserving each row's Name and Port.
+18. In **Edit Selected RS485 Pair**, use **Apply To All RS485 (Keep Name/Ports)** to copy serial settings to all RS485 pairs while preserving each pair's Name, Sender Port, and Echo Port.
+19. In **Presets**, set up each preset name and pick channel names for that preset.
    - Each preset card header also shows the custom name for quick identification.
-19. Use the 5 preset buttons to the right of **Fullscreen** to apply presets:
-   - Selected COM-matching channels are set to **Enabled**.
+20. Use the 5 preset buttons to the right of **Fullscreen** to apply presets:
+   - Selected name-matching channels are set to **Enabled**.
    - Non-selected channels are set to **Disabled**.
    - Running channels that become disabled are stopped automatically.
-20. Use **Refresh COM List** to reload dropdown values from system ports; manual values are still allowed (including blank/duplicate/custom values).
+   - When that protocol group is already running, newly selected channels start automatically and selected running channels continue.
+   - Applying a preset while tests are idle only changes enablement; it does not start communications.
+21. Use **Refresh COM List** to reload dropdown values from system ports; manual values are still allowed (including blank/duplicate/custom values).
 
 ## Settings file
 - Settings path (script + EXE): `%USERPROFILE%\Documents\SerialLoopbackTester\serial_tester_settings.json`.
@@ -105,6 +115,10 @@ Outputs:
 - Auto-start-after-launch default lives in `ui.auto_start_after_launch_2s`.
 - 2-second startup delay default lives in `ui.delay_comm_start_2s`.
 - Overview compact mode default lives in `ui.overview_compact_view`.
+- Overview preset filtering default lives in `ui.overview_hide_non_preset_ports`.
+- The last applied preset lives in `ui.active_preset_idx`.
+- Global serial control values live in `ui.global_baudrate`, `ui.global_interval_ms`, and `ui.global_packet_size_bytes`.
 - Channel counts live in `ui.rs232_count` and `ui.rs485_pair_count`.
-- Preset names and COM selections live in `ui.presets`.
+- Preset button labels and selected channel names live in `ui.presets`.
 - Port names are not forced to be unique/valid, so you can stage configs on systems with fewer COM ports.
+- Presets match channel names, so multiple names can use the same COM port; duplicate channel names are enabled/disabled together.

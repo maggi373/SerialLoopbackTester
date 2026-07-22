@@ -2,7 +2,7 @@
 #define MyAppName "Serial Loopback Tester"
 #endif
 #ifndef MyAppVersion
-#define MyAppVersion "1.1.1"
+#define MyAppVersion "1.2.0"
 #endif
 #ifndef MyAppPublisher
 #define MyAppPublisher "PoldenTEK"
@@ -24,12 +24,14 @@ DefaultDirName={autopf}\Serial Loopback Tester
 DefaultGroupName=Serial Loopback Tester
 OutputDir=..\dist\installer
 OutputBaseFilename={#MyOutputBaseFilename}
-Compression=lzma
+Compression=zip
 SolidCompression=yes
 WizardStyle=modern
 DisableProgramGroupPage=yes
 UninstallDisplayIcon={app}\{#MyAppExeName}
-ArchitecturesInstallIn64BitMode=x64
+PrivilegesRequired=lowest
+PrivilegesRequiredOverridesAllowed=dialog
+ArchitecturesInstallIn64BitMode=x64compatible
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
