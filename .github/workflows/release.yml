@@ -11,7 +11,7 @@ name: Build release
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Existing release tag to build and upload (for example 1.3.0 or v1.3.0)"
+        description: "Existing release tag to build and upload (for example 1.3.1 or v1.3.1)"
         required: false
         type: string
 
@@ -123,8 +123,23 @@ jobs:
       - name: Download all release files
         uses: actions/download-artifact@v8
         with:
-          path: release-assets
+          path: downloaded-assets
           merge-multiple: true
+
+      - name: Collect release files
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          while IFS= read -r -d '' asset; do
+            filename="${asset##*/}"
+            destination="release-assets/$filename"
+            if [[ -e "$destination" ]]; then
+              echo "Duplicate release filename: $filename" >&2
+              exit 1
+            fi
+            cp -- "$asset" "$destination"
+          done < <(find downloaded-assets -type f -print0)
+          test -n "$(find release-assets -maxdepth 1 -type f -print -quit)"
 
       - name: Generate checksums
         working-directory: release-assets

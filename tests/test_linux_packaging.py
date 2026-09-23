@@ -14,6 +14,14 @@ class LinuxPackagingTests(unittest.TestCase):
         self.assertIn('- "[0-9]*"', workflow)
         self.assertIn("release_tag:", workflow)
 
+    def test_release_workflow_flattens_artifacts_before_upload(self):
+        workflow = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+
+        self.assertIn("path: downloaded-assets", workflow)
+        self.assertIn("find downloaded-assets -type f -print0", workflow)
+        self.assertIn('destination="release-assets/$filename"', workflow)
+        self.assertIn('gh release upload "$RELEASE_TAG" ./*', workflow)
+
     def test_uport_installer_defaults_to_rs485_two_wire_and_verifies_archive(self):
         script = (REPO_ROOT / "drivers" / "moxa" / "install_uport_1150i.sh").read_text(encoding="utf-8")
 
