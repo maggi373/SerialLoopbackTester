@@ -2,7 +2,7 @@
 #define MyAppName "Serial Loopback Tester"
 #endif
 #ifndef MyAppVersion
-#define MyAppVersion "1.2.0"
+#define MyAppVersion "1.3.0"
 #endif
 #ifndef MyAppPublisher
 #define MyAppPublisher "PoldenTEK"
@@ -41,7 +41,7 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 Name: "startup"; Description: "Start Serial Loopback Tester when Windows starts"; GroupDescription: "Autostart:"; Flags: unchecked
 
 [Files]
-Source: "..\dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\{#MyAppExeBaseName}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]

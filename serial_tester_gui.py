@@ -13,6 +13,8 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import messagebox, scrolledtext, ttk
 
+from paro_simulator import ParoSimulator
+
 try:
     import serial
     from serial import SerialException
@@ -27,6 +29,7 @@ MAX_RS485_PAIR_COUNT = 128
 DEFAULT_PRESET_COUNT = 5
 FAILURE_WINDOW_SECONDS = 3600
 FAILURE_WINDOW_LABEL = "1h"
+FAILURE_GRACE_PERIOD_SECONDS = 2.0
 WORKER_EVENT_POLL_MS = 50
 UI_RENDER_INTERVAL_MS = 200
 MAX_WORKER_EVENTS_PER_POLL = 500
@@ -34,7 +37,7 @@ MAX_WORKER_EVENTS_DURING_WINDOW_MOTION = 50
 WINDOW_CONFIGURE_SETTLE_MS = 180
 MAX_LOG_LINES = 1200
 WORKER_JOIN_TIMEOUT_S = 0.75
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 APP_PUBLISHER = "PoldenTEK"
 SETTINGS_FILENAME = "serial_tester_settings.json"
 DEFAULT_BAUDRATE = 19200
@@ -50,10 +53,17 @@ DEFAULT_RS485_PAYLOAD_HEX = "A55AA55AA55AA55A"
 PARITY_OPTIONS = ("N", "E", "O", "M", "S")
 BYTESIZE_OPTIONS = ("5", "6", "7", "8")
 STOPBITS_OPTIONS = ("1", "1.5", "2")
+RS232_MODE_OPTIONS = ("Loopback Test", "RS485 Reply", "PARO Simulator")
+RS232_MODE_LOOPBACK = "loopback"
+RS232_MODE_RS485_REPLY = "rs485_reply"
+RS232_MODE_PARO = "paro"
+DEFAULT_PARO_DEVICE_ID = 1
 APP_FOLDER_NAME = "SerialLoopbackTester"
 STOPBITS_ALLOWED_VALUES = (1.0, 1.5, 2.0)
 RS232_WORKER_CONFIG_KEYS = (
     "enabled",
+    "mode",
+    "paro_device_id",
     "port",
     "baudrate",
     "bytesize",
@@ -66,7 +76,6 @@ RS232_WORKER_CONFIG_KEYS = (
 RS485_WORKER_CONFIG_KEYS = (
     "enabled",
     "sender_port",
-    "echo_port",
     "baudrate",
     "bytesize",
     "parity",
@@ -184,7 +193,44 @@ def stopbits_to_text(value: object) -> str:
 def normalize_port_text(value: object) -> str:
     if value is None:
         return ""
-    return str(value).strip().upper()
+    text = str(value).strip()
+    if len(text) > 3 and text[:3].casefold() == "com" and text[3:].isdigit():
+        return text.upper()
+    return text
+
+
+def open_serial_endpoint(
+    port_name: object,
+    *,
+    baudrate: int,
+    bytesize: int,
+    parity: str,
+    stopbits: float,
+    timeout: float,
+    write_timeout: float,
+):
+    """Open a local serial device or a raw TCP serial endpoint."""
+    endpoint = normalize_port_text(port_name)
+    if not endpoint:
+        raise ValueError("Serial port or socket URL cannot be empty.")
+
+    serial_options = {
+        "baudrate": baudrate,
+        "bytesize": bytesize,
+        "parity": parity,
+        "stopbits": stopbits,
+        "timeout": timeout,
+        "write_timeout": write_timeout,
+    }
+    if "://" in endpoint:
+        scheme, remainder = endpoint.split("://", 1)
+        if scheme.casefold() != "socket":
+            raise ValueError(
+                f"Unsupported serial URL scheme '{scheme}'. Use socket://host:port for raw TCP."
+            )
+        return serial.serial_for_url(f"socket://{remainder}", **serial_options)
+
+    return serial.Serial(port=endpoint, **serial_options)
 
 
 def normalize_port_list(values: object) -> list[str]:
@@ -234,12 +280,44 @@ def normalize_name_list(values: object) -> list[str]:
     return normalized
 
 
+def rs232_mode_label(mode: object) -> str:
+    normalized = str(mode).strip().lower()
+    if normalized == RS232_MODE_PARO:
+        return "PARO Simulator"
+    if normalized == RS232_MODE_RS485_REPLY:
+        return "RS485 Reply"
+    return "Loopback Test"
+
+
+def rs232_mode_value(label: object) -> str:
+    normalized = str(label).strip().casefold()
+    if normalized in {RS232_MODE_PARO, "paro simulator"}:
+        return RS232_MODE_PARO
+    if normalized in {RS232_MODE_RS485_REPLY, "rs485 reply"}:
+        return RS232_MODE_RS485_REPLY
+    return RS232_MODE_LOOPBACK
+
+
+def rs232_port_role_text(config: dict) -> str:
+    port = str(config.get("port", ""))
+    if config.get("mode") == RS232_MODE_PARO:
+        device_id = int(config.get("paro_device_id", DEFAULT_PARO_DEVICE_ID))
+        prefix = f"{port} · " if port else ""
+        return f"{prefix}PARO ID {device_id:02d}"
+    if config.get("mode") == RS232_MODE_RS485_REPLY:
+        prefix = f"{port} · " if port else ""
+        return f"{prefix}RS485 Reply"
+    return port
+
+
 def default_rs232_item(index: int) -> dict:
     number = index + 1
     return {
         "enabled": True,
         "name": f"RS232 {number}",
-        "port": f"COM{number}",
+        "mode": RS232_MODE_LOOPBACK,
+        "paro_device_id": DEFAULT_PARO_DEVICE_ID,
+        "port": f"COM{number}" if os.name == "nt" else "",
         "baudrate": DEFAULT_BAUDRATE,
         "bytesize": 8,
         "parity": "N",
@@ -252,13 +330,11 @@ def default_rs232_item(index: int) -> dict:
 
 def default_rs485_item(index: int) -> dict:
     number = index + 1
-    sender = 41 + (index * 2)
-    echo = sender + 1
+    sender = 41 + index
     return {
         "enabled": True,
-        "name": f"RS485 Pair {number}",
-        "sender_port": f"COM{sender}",
-        "echo_port": f"COM{echo}",
+        "name": f"RS485 {number}",
+        "sender_port": f"COM{sender}" if os.name == "nt" else "",
         "baudrate": DEFAULT_BAUDRATE,
         "bytesize": 8,
         "parity": "N",
@@ -297,11 +373,17 @@ def normalize_rs232(item: object, index: int) -> dict:
     else:
         port = base["port"]
     enabled = as_bool(source.get("enabled", base["enabled"]), base["enabled"])
+    mode = str(source.get("mode", base["mode"])).strip().lower()
+    if mode not in {RS232_MODE_LOOPBACK, RS232_MODE_RS485_REPLY, RS232_MODE_PARO}:
+        mode = base["mode"]
+    paro_device_id = normalize_count(source.get("paro_device_id"), base["paro_device_id"], 0, 99)
     payload_hex = sanitize_hex_payload(source.get("payload_hex"), base["payload_hex"])
 
     return {
         "enabled": enabled,
         "name": name.strip(),
+        "mode": mode,
+        "paro_device_id": paro_device_id,
         "port": port.strip(),
         "baudrate": baudrate,
         "bytesize": bytesize,
@@ -340,11 +422,6 @@ def normalize_rs485(item: object, index: int) -> dict:
         sender_port = "" if raw_sender is None else str(raw_sender)
     else:
         sender_port = base["sender_port"]
-    if "echo_port" in source:
-        raw_echo = source.get("echo_port")
-        echo_port = "" if raw_echo is None else str(raw_echo)
-    else:
-        echo_port = base["echo_port"]
     enabled = as_bool(source.get("enabled", base["enabled"]), base["enabled"])
     payload_hex = sanitize_hex_payload(source.get("payload_hex"), base["payload_hex"])
 
@@ -352,7 +429,6 @@ def normalize_rs485(item: object, index: int) -> dict:
         "enabled": enabled,
         "name": name.strip(),
         "sender_port": sender_port.strip(),
-        "echo_port": echo_port.strip(),
         "baudrate": baudrate,
         "bytesize": bytesize,
         "parity": parity,
@@ -384,7 +460,29 @@ def default_preset_item(index: int) -> dict:
     return {
         "name": f"Preset {index + 1}",
         "names": [],
+        "rs232_roles": {},
     }
+
+
+def normalize_preset_roles(value: object) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    roles: dict[str, str] = {}
+    for raw_name, raw_mode in value.items():
+        name = normalize_name_text(raw_name)
+        mode = rs232_mode_value(raw_mode)
+        raw_mode_text = str(raw_mode).strip().casefold()
+        valid_values = {
+            RS232_MODE_LOOPBACK,
+            RS232_MODE_RS485_REPLY,
+            RS232_MODE_PARO,
+            "loopback test",
+            "rs485 reply",
+            "paro simulator",
+        }
+        if name and raw_mode_text in valid_values:
+            roles[name] = mode
+    return roles
 
 
 def normalize_preset_item(item: object, index: int) -> dict:
@@ -395,6 +493,7 @@ def normalize_preset_item(item: object, index: int) -> dict:
     preset = {
         "name": name,
         "names": names,
+        "rs232_roles": normalize_preset_roles(source.get("rs232_roles", base["rs232_roles"])),
     }
     legacy_ports = normalize_port_list(source.get("ports", []))
     if legacy_ports:
@@ -416,8 +515,7 @@ def migrate_preset_ports_to_names(presets: list[dict], rs232_ports: list[dict], 
 
             for cfg in rs485_pairs:
                 sender = normalize_port_text(cfg.get("sender_port"))
-                echo = normalize_port_text(cfg.get("echo_port"))
-                if sender and echo and sender in legacy_ports and echo in legacy_ports:
+                if sender and sender in legacy_ports:
                     migrated_names.append(str(cfg.get("name", "")).strip())
 
             names = normalize_name_list(migrated_names)
@@ -563,12 +661,33 @@ def resolve_documents_folder() -> Path:
     return Path.home()
 
 
+def resolve_linux_config_folder() -> Path:
+    configured = os.environ.get("XDG_CONFIG_HOME", "").strip()
+    config_home = Path(configured).expanduser() if configured else Path.home() / ".config"
+    if not config_home.is_absolute():
+        config_home = Path.home() / ".config"
+    return config_home / APP_FOLDER_NAME
+
+
 def resolve_settings_path() -> Path:
-    base = resolve_documents_folder() / APP_FOLDER_NAME
-    base.mkdir(parents=True, exist_ok=True)
+    if sys.platform.startswith("linux"):
+        base = resolve_linux_config_folder()
+        legacy_base = resolve_documents_folder() / APP_FOLDER_NAME
+    else:
+        base = resolve_documents_folder() / APP_FOLDER_NAME
+        legacy_base = None
+    base.mkdir(parents=True, exist_ok=True, mode=0o700)
     settings_path = base / SETTINGS_FILENAME
 
-    if not settings_path.exists():
+    if not settings_path.exists() and legacy_base is not None:
+        legacy_path = legacy_base / SETTINGS_FILENAME
+        if legacy_path.exists():
+            try:
+                settings_path.write_text(legacy_path.read_text(encoding="utf-8"), encoding="utf-8")
+            except OSError:
+                pass
+
+    if os.name == "nt" and not settings_path.exists():
         appdata = os.environ.get("APPDATA")
         if appdata:
             legacy_path = Path(appdata) / APP_FOLDER_NAME / SETTINGS_FILENAME
@@ -595,6 +714,11 @@ def read_exact(port: serial.Serial, length: int, timeout_s: float, stop_event: t
             time.sleep(0.01)
 
     return bytes(data)
+
+
+def serial_error_detail(exc: BaseException) -> str:
+    detail = str(exc).strip()
+    return detail or exc.__class__.__name__
 
 
 class RS232Worker(threading.Thread):
@@ -645,64 +769,147 @@ class RS232Worker(threading.Thread):
             }
         )
 
-    def open_port(self) -> serial.Serial:
-        return serial.Serial(
-            port=self.config["port"],
+    def open_port(self):
+        read_timeout = float(self.config["timeout_s"])
+        if self.config.get("mode") in {RS232_MODE_PARO, RS232_MODE_RS485_REPLY}:
+            read_timeout = min(read_timeout, 0.05)
+        return open_serial_endpoint(
+            self.config["port"],
             baudrate=int(self.config["baudrate"]),
             bytesize=int(self.config["bytesize"]),
             parity=str(self.config["parity"]).upper(),
             stopbits=float(self.config["stopbits"]),
-            timeout=float(self.config["timeout_s"]),
+            timeout=read_timeout,
             write_timeout=float(self.config["timeout_s"]),
         )
+
+    def run_paro_simulator(self, port: serial.Serial) -> None:
+        simulator = ParoSimulator(device_id=int(self.config.get("paro_device_id", DEFAULT_PARO_DEVICE_ID)))
+        while not self.stop_event.is_set():
+            waiting = max(int(getattr(port, "in_waiting", 0)), 0)
+            received = port.read(max(1, waiting))
+            responses = simulator.feed(received) if received else simulator.poll()
+            for response in responses:
+                written = port.write(response)
+                port.flush()
+                if written != len(response):
+                    raise SerialException(f"only wrote {written} of {len(response)} PARO response byte(s)")
+                preview = response.decode("ascii", errors="backslashreplace").strip()
+                if len(preview) > 160:
+                    preview = preview[:157] + "..."
+                self.emit("PASS", f"PARO TX {preview}", pass_inc=1)
+
+            pending_baud = simulator.take_pending_baud()
+            if pending_baud is not None:
+                port.baudrate = pending_baud
+                self.emit("Running", f"PARO baud changed to {pending_baud}", log=True)
+
+    def run_rs485_reply(self, port: serial.Serial) -> None:
+        """Passively echo received bytes without transmitting unsolicited data."""
+        while not self.stop_event.is_set():
+            waiting = max(int(getattr(port, "in_waiting", 0)), 0)
+            received = port.read(max(1, waiting))
+            if not received:
+                continue
+            written = port.write(received)
+            port.flush()
+            if written != len(received):
+                raise SerialException(f"only echoed {written} of {len(received)} byte(s)")
+            received_hex = received.hex(" ").upper()
+            self.emit("PASS", f"RS485 reply RX/TX {received_hex}", pass_inc=1)
 
     def run(self) -> None:
         payload = bytes.fromhex(self.config["payload_hex"])
         timeout_s = max(float(self.config["timeout_s"]), 0.05)
         interval_s = max(int(self.config["interval_ms"]) / 1000.0, MIN_INTERVAL_MS / 1000.0)
         startup_delay_s = max(as_float(self.config.get("startup_delay_s", 0.0), 0.0), 0.0)
+        grace_period_s = max(
+            as_float(self.config.get("failure_grace_period_s", FAILURE_GRACE_PERIOD_SECONDS), FAILURE_GRACE_PERIOD_SECONDS),
+            0.0,
+        )
+        failure_grace_deadline: float | None = None
         payload_hex = payload.hex(" ").upper()
+        port_name = str(self.config["port"])
 
         while not self.stop_event.is_set():
             try:
-                with self.open_port() as port:
+                port = self.open_port()
+            except (SerialException, OSError, ValueError) as exc:
+                if self.stop_event.is_set():
+                    break
+                self.emit(
+                    "ERROR",
+                    f"PORT OPEN FAILED ({port_name}): {serial_error_detail(exc)}",
+                    fail_inc=1,
+                    error_inc=1,
+                    log=True,
+                )
+                self.stop_event.wait(2.0)
+                continue
+
+            try:
+                with port:
                     with self.port_lock:
                         self.active_port = port
-                    self.emit("Running", "Port open", log=True)
+                    if self.config.get("mode") == RS232_MODE_PARO:
+                        device_id = int(self.config.get("paro_device_id", DEFAULT_PARO_DEVICE_ID))
+                        self.emit("Running", f"PARO simulator open: {port_name}, ID {device_id:02d}", log=True)
+                    elif self.config.get("mode") == RS232_MODE_RS485_REPLY:
+                        self.emit("Running", f"RS485 reply open: {port_name} (passive)", log=True)
+                    else:
+                        self.emit("Running", f"Port open: {port_name}", log=True)
                     if startup_delay_s > 0:
                         self.emit("Standby", f"Startup delay {startup_delay_s:.1f}s")
                         if self.stop_event.wait(startup_delay_s):
                             break
 
-                    while not self.stop_event.is_set():
-                        port.reset_input_buffer()
-                        port.reset_output_buffer()
-                        written = port.write(payload)
-                        port.flush()
-                        if self.stop_event.is_set():
-                            break
-                        rx = read_exact(port, len(payload), timeout_s, self.stop_event)
-                        if self.stop_event.is_set():
-                            break
+                    port.reset_input_buffer()
+                    port.reset_output_buffer()
+                    if failure_grace_deadline is None:
+                        failure_grace_deadline = time.monotonic() + grace_period_s
 
-                        if written == len(payload) and rx == payload:
-                            self.emit("PASS", f"TX/RX {payload_hex}", pass_inc=1)
-                        else:
-                            rx_hex = rx.hex(" ").upper() if rx else "<none>"
-                            self.emit(
-                                "FAIL",
-                                f"TX {payload_hex} RX {rx_hex}",
-                                fail_inc=1,
-                                log=True,
-                            )
+                    if self.config.get("mode") == RS232_MODE_PARO:
+                        self.run_paro_simulator(port)
+                    elif self.config.get("mode") == RS232_MODE_RS485_REPLY:
+                        self.run_rs485_reply(port)
+                    else:
+                        while not self.stop_event.is_set():
+                            port.reset_output_buffer()
+                            written = port.write(payload)
+                            port.flush()
+                            if self.stop_event.is_set():
+                                break
+                            rx = read_exact(port, len(payload), timeout_s, self.stop_event)
+                            if self.stop_event.is_set():
+                                break
 
-                        if self.stop_event.wait(interval_s):
-                            break
+                            if written == len(payload) and rx == payload:
+                                self.emit("PASS", f"TX/RX {payload_hex}", pass_inc=1)
+                            else:
+                                rx_hex = rx.hex(" ").upper() if rx else "<none>"
+                                if time.monotonic() < failure_grace_deadline:
+                                    self.emit("Running", f"Grace period: TX {payload_hex} RX {rx_hex} (failure ignored)")
+                                else:
+                                    self.emit(
+                                        "FAIL",
+                                        f"TX {payload_hex} RX {rx_hex}",
+                                        fail_inc=1,
+                                        log=True,
+                                    )
+
+                            if self.stop_event.wait(interval_s):
+                                break
 
             except (SerialException, OSError, ValueError) as exc:
                 if self.stop_event.is_set():
                     break
-                self.emit("ERROR", str(exc), fail_inc=1, error_inc=1, log=True)
+                self.emit(
+                    "ERROR",
+                    f"SERIAL I/O FAILED ({port_name}): {serial_error_detail(exc)}",
+                    fail_inc=1,
+                    error_inc=1,
+                    log=True,
+                )
                 self.stop_event.wait(2.0)
             finally:
                 with self.port_lock:
@@ -758,9 +965,9 @@ class RS485PairWorker(threading.Thread):
             }
         )
 
-    def open_port(self, port_name: str) -> serial.Serial:
-        return serial.Serial(
-            port=port_name,
+    def open_port(self, port_name: str):
+        return open_serial_endpoint(
+            port_name,
             baudrate=int(self.config["baudrate"]),
             bytesize=int(self.config["bytesize"]),
             parity=str(self.config["parity"]).upper(),
@@ -774,72 +981,85 @@ class RS485PairWorker(threading.Thread):
         timeout_s = max(float(self.config["timeout_s"]), 0.05)
         interval_s = max(int(self.config["interval_ms"]) / 1000.0, MIN_INTERVAL_MS / 1000.0)
         startup_delay_s = max(as_float(self.config.get("startup_delay_s", 0.0), 0.0), 0.0)
+        grace_period_s = max(
+            as_float(self.config.get("failure_grace_period_s", FAILURE_GRACE_PERIOD_SECONDS), FAILURE_GRACE_PERIOD_SECONDS),
+            0.0,
+        )
+        failure_grace_deadline: float | None = None
         payload_hex = payload.hex(" ").upper()
+        port_name = str(self.config["sender_port"])
 
         while not self.stop_event.is_set():
             try:
-                with self.open_port(self.config["sender_port"]) as sender:
-                    with self.open_port(self.config["echo_port"]) as echo:
-                        with self.port_lock:
-                            self.active_ports = (sender, echo)
-                        self.emit("Running", "Ports open", log=True)
-                        if startup_delay_s > 0:
-                            self.emit("Standby", f"Startup delay {startup_delay_s:.1f}s")
-                            if self.stop_event.wait(startup_delay_s):
-                                break
+                sender = self.open_port(port_name)
+            except (SerialException, OSError, ValueError) as exc:
+                if self.stop_event.is_set():
+                    break
+                self.emit(
+                    "ERROR",
+                    f"PORT OPEN FAILED ({port_name}): {serial_error_detail(exc)}",
+                    fail_inc=1,
+                    error_inc=1,
+                    log=True,
+                )
+                self.stop_event.wait(2.0)
+                continue
 
-                        while not self.stop_event.is_set():
-                            sender.reset_input_buffer()
-                            sender.reset_output_buffer()
-                            echo.reset_input_buffer()
-                            echo.reset_output_buffer()
+            try:
+                with sender:
+                    with self.port_lock:
+                        self.active_ports = (sender,)
+                    self.emit("Running", f"Port open: {port_name}", log=True)
+                    if startup_delay_s > 0:
+                        self.emit("Standby", f"Startup delay {startup_delay_s:.1f}s")
+                        if self.stop_event.wait(startup_delay_s):
+                            break
 
-                            sender.write(payload)
-                            sender.flush()
-                            if self.stop_event.is_set():
-                                break
+                    if failure_grace_deadline is None:
+                        failure_grace_deadline = time.monotonic() + grace_period_s
 
-                            seen = read_exact(echo, len(payload), timeout_s, self.stop_event)
-                            if self.stop_event.is_set():
-                                break
-                            if seen != payload:
-                                seen_hex = seen.hex(" ").upper() if seen else "<none>"
+                    while not self.stop_event.is_set():
+                        sender.reset_input_buffer()
+                        sender.reset_output_buffer()
+
+                        written = sender.write(payload)
+                        sender.flush()
+                        if self.stop_event.is_set():
+                            break
+
+                        bounced = read_exact(sender, len(payload), timeout_s, self.stop_event)
+                        if self.stop_event.is_set():
+                            break
+                        if written == len(payload) and bounced == payload:
+                            self.emit("PASS", f"TX/RX {payload_hex}", pass_inc=1)
+                        else:
+                            bounced_hex = bounced.hex(" ").upper() if bounced else "<none>"
+                            if time.monotonic() < failure_grace_deadline:
                                 self.emit(
-                                    "FAIL",
-                                    f"Echo RX {seen_hex}, expected {payload_hex}",
-                                    fail_inc=1,
-                                    log=True,
+                                    "Running",
+                                    f"Grace period: RX {bounced_hex}, expected {payload_hex} (failure ignored)",
                                 )
-                                if self.stop_event.wait(interval_s):
-                                    break
-                                continue
-
-                            echo.write(seen)
-                            echo.flush()
-                            if self.stop_event.is_set():
-                                break
-
-                            bounced = read_exact(sender, len(payload), timeout_s, self.stop_event)
-                            if self.stop_event.is_set():
-                                break
-                            if bounced == payload:
-                                self.emit("PASS", f"TX/RX {payload_hex}", pass_inc=1)
                             else:
-                                bounced_hex = bounced.hex(" ").upper() if bounced else "<none>"
                                 self.emit(
                                     "FAIL",
-                                    f"Sender RX {bounced_hex}, expected {payload_hex}",
+                                    f"RX {bounced_hex}, expected {payload_hex}",
                                     fail_inc=1,
                                     log=True,
                                 )
 
-                            if self.stop_event.wait(interval_s):
-                                break
+                        if self.stop_event.wait(interval_s):
+                            break
 
             except (SerialException, OSError, ValueError) as exc:
                 if self.stop_event.is_set():
                     break
-                self.emit("ERROR", str(exc), fail_inc=1, error_inc=1, log=True)
+                self.emit(
+                    "ERROR",
+                    f"SERIAL I/O FAILED ({port_name}): {serial_error_detail(exc)}",
+                    fail_inc=1,
+                    error_inc=1,
+                    log=True,
+                )
                 self.stop_event.wait(2.0)
             finally:
                 with self.port_lock:
@@ -895,6 +1115,7 @@ class SerialTesterApp(tk.Tk):
         self.preset_name_vars: list[tk.StringVar] = []
         self.preset_panels: list[ttk.LabelFrame] = []
         self.preset_name_listboxes: list[tk.Listbox] = []
+        self.preset_role_vars: list[tk.StringVar] = []
         self.preset_name_options: list[dict[str, str]] = []
         self.preset_buttons: list[ttk.Button] = []
         self.active_preset_idx: int | None = self.ui_settings.get("active_preset_idx")
@@ -954,7 +1175,7 @@ class SerialTesterApp(tk.Tk):
 
     def _refresh_window_title(self) -> None:
         self.title(
-            f"Serial Loopback Tester v{APP_VERSION} ({len(self.rs232_configs)}x RS232 + {len(self.rs485_configs)}x RS485 Pairs)"
+            f"Serial Loopback Tester v{APP_VERSION} ({len(self.rs232_configs)}x RS232 + {len(self.rs485_configs)}x RS485)"
         )
 
     def _active_tab_text(self) -> str:
@@ -1020,7 +1241,7 @@ class SerialTesterApp(tk.Tk):
 
         ttk.Button(toolbar, text="Save Settings", command=self.save_settings).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(toolbar, text="Reload Settings", command=self.reload_settings).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(toolbar, text="Refresh COM List", command=lambda: self.refresh_com_port_options(show_message=True)).pack(
+        ttk.Button(toolbar, text="Refresh Port List", command=lambda: self.refresh_com_port_options(show_message=True)).pack(
             side=tk.LEFT, padx=(0, 6)
         )
         self.fullscreen_button = ttk.Button(toolbar, text="Fullscreen", command=self.toggle_fullscreen)
@@ -1123,12 +1344,15 @@ class SerialTesterApp(tk.Tk):
         ports: list[str] = []
         error_text = ""
         try:
-            ports = sorted({str(item.device).strip().upper() for item in list_ports.comports() if item.device})
+            ports = sorted(
+                {normalize_port_text(item.device) for item in list_ports.comports() if item.device},
+                key=self._com_port_sort_key,
+            )
         except Exception as exc:  # pragma: no cover - defensive for platform/driver edge cases
             error_text = str(exc)
 
         self.com_port_values = [""] + ports
-        for attr in ("rs232_port_combo", "rs485_sender_combo", "rs485_echo_combo"):
+        for attr in ("rs232_port_combo", "rs485_sender_combo"):
             combo = getattr(self, attr, None)
             if combo is not None:
                 combo.configure(values=self.com_port_values)
@@ -1137,41 +1361,46 @@ class SerialTesterApp(tk.Tk):
         if show_message:
             if error_text:
                 messagebox.showwarning(
-                    "COM list refresh",
-                    f"Could not query COM ports from system.\n\n{error_text}\n\nYou can still type port names manually.",
+                    "Serial port refresh",
+                    f"Could not query serial ports from the system.\n\n{error_text}\n\nYou can still type port names manually.",
                 )
             else:
-                messagebox.showinfo("COM list refresh", f"Detected {len(ports)} COM port(s).")
+                messagebox.showinfo("Serial port refresh", f"Detected {len(ports)} serial port(s).")
 
     @staticmethod
     def _com_port_sort_key(port: str) -> tuple[int, int, str]:
-        text = port.strip().upper()
-        if text.startswith("COM") and text[3:].isdigit():
-            return (0, int(text[3:]), text)
-        return (1, 0, text)
+        text = port.strip()
+        upper = text.upper()
+        if upper.startswith("COM") and upper[3:].isdigit():
+            return (0, int(upper[3:]), upper)
+        return (1, 0, text.casefold())
 
     def _collect_preset_name_options(self) -> list[dict[str, str]]:
         options: list[dict[str, str]] = []
         for idx, cfg in enumerate(self.rs232_configs):
             name = normalize_name_text(cfg["name"]) or f"RS232 {idx + 1}"
             port = normalize_port_text(cfg["port"]) or "No port"
+            role = rs232_mode_label(cfg.get("mode"))
+            if cfg.get("mode") == RS232_MODE_PARO:
+                role += f" ID {int(cfg.get('paro_device_id', DEFAULT_PARO_DEVICE_ID)):02d}"
             options.append(
                 {
                     "name": name,
                     "key": normalize_name_key(name),
-                    "label": f"{name}  [RS232 #{idx + 1}, {port}]",
+                    "group": "rs232",
+                    "label": f"{name}  [RS232 #{idx + 1}, {port}, {role}]",
                 }
             )
 
         for idx, cfg in enumerate(self.rs485_configs):
-            name = normalize_name_text(cfg["name"]) or f"RS485 Pair {idx + 1}"
-            sender = normalize_port_text(cfg["sender_port"]) or "No sender"
-            echo = normalize_port_text(cfg["echo_port"]) or "No echo"
+            name = normalize_name_text(cfg["name"]) or f"RS485 {idx + 1}"
+            sender = normalize_port_text(cfg["sender_port"]) or "No port"
             options.append(
                 {
                     "name": name,
                     "key": normalize_name_key(name),
-                    "label": f"{name}  [RS485 #{idx + 1}, {sender} <-> {echo}]",
+                    "group": "rs485",
+                    "label": f"{name}  [RS485 #{idx + 1}, {sender}]",
                 }
             )
 
@@ -1194,6 +1423,39 @@ class SerialTesterApp(tk.Tk):
                 if name:
                     names.append(name)
         return normalize_name_list(names)
+
+    @staticmethod
+    def _preset_role_for_name(preset: dict, name: str) -> str | None:
+        name_key = normalize_name_key(name)
+        for configured_name, mode in normalize_preset_roles(preset.get("rs232_roles", {})).items():
+            if normalize_name_key(configured_name) == name_key:
+                return mode
+        return None
+
+    def _assign_preset_role(self, idx: int, clear: bool = False) -> None:
+        if not (0 <= idx < len(self.preset_configs)) or idx >= len(self.preset_name_listboxes):
+            return
+        listbox = self.preset_name_listboxes[idx]
+        selected_options = [
+            self.preset_name_options[item_idx]
+            for item_idx in listbox.curselection()
+            if 0 <= item_idx < len(self.preset_name_options)
+            and self.preset_name_options[item_idx].get("group") == "rs232"
+        ]
+        if not selected_options:
+            messagebox.showinfo("Preset roles", "Select at least one RS232 channel in this preset first.")
+            return
+
+        preset = self.preset_configs[idx]
+        roles = normalize_preset_roles(preset.get("rs232_roles", {}))
+        selected_keys = {normalize_name_key(option["name"]) for option in selected_options}
+        roles = {name: mode for name, mode in roles.items() if normalize_name_key(name) not in selected_keys}
+        if not clear:
+            mode = rs232_mode_value(self.preset_role_vars[idx].get())
+            for option in selected_options:
+                roles[option["name"]] = mode
+        preset["rs232_roles"] = roles
+        self._refresh_preset_name_options(show_message=False)
 
     def _on_preset_name_changed(self, idx: int) -> None:
         if not (0 <= idx < len(self.preset_configs)):
@@ -1231,7 +1493,12 @@ class SerialTesterApp(tk.Tk):
             current_selected = {normalize_name_key(name) for name in normalize_name_list(self.preset_configs[idx]["names"])}
             listbox.delete(0, tk.END)
             for option in self.preset_name_options:
-                listbox.insert(tk.END, option["label"])
+                label = option["label"]
+                if option.get("group") == "rs232":
+                    preset_mode = self._preset_role_for_name(self.preset_configs[idx], option["name"])
+                    if preset_mode is not None:
+                        label += f"  [Preset role: {rs232_mode_label(preset_mode)}]"
+                listbox.insert(tk.END, label)
             for item_idx, option in enumerate(self.preset_name_options):
                 if option["key"] in current_selected:
                     listbox.selection_set(item_idx)
@@ -1246,7 +1513,7 @@ class SerialTesterApp(tk.Tk):
         top = ttk.Frame(parent)
         top.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         top.columnconfigure(0, weight=1)
-        ttk.Label(top, text="Configure 5 named presets and select which channel names each preset enables/disables.").grid(
+        ttk.Label(top, text="Configure enabled channels and optional RS232 roles for each preset.").grid(
             row=0, column=0, sticky="w"
         )
         ttk.Button(top, text="Refresh Name Choices", command=lambda: self._refresh_preset_name_options(show_message=True)).grid(
@@ -1267,6 +1534,7 @@ class SerialTesterApp(tk.Tk):
         self.preset_name_vars = []
         self.preset_panels = []
         self.preset_name_listboxes = []
+        self.preset_role_vars = []
         for idx in range(DEFAULT_PRESET_COUNT):
             preset_name = self.preset_configs[idx]["name"]
             pane = ttk.LabelFrame(grid, text=f"Preset {idx + 1}: {preset_name}", padding=8)
@@ -1287,8 +1555,29 @@ class SerialTesterApp(tk.Tk):
             listbox.bind("<<ListboxSelect>>", lambda _event, i=idx: self._on_preset_names_selected(i))
             self.preset_name_listboxes.append(listbox)
 
+            role_actions = ttk.Frame(pane)
+            role_actions.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+            ttk.Label(role_actions, text="Selected RS232 role").pack(side=tk.LEFT, padx=(0, 6))
+            role_var = tk.StringVar(value="RS485 Reply")
+            self.preset_role_vars.append(role_var)
+            ttk.Combobox(
+                role_actions,
+                textvariable=role_var,
+                values=RS232_MODE_OPTIONS,
+                state="readonly",
+                width=16,
+            ).pack(side=tk.LEFT, padx=(0, 6))
+            ttk.Button(role_actions, text="Assign", command=lambda i=idx: self._assign_preset_role(i)).pack(
+                side=tk.LEFT, padx=(0, 6)
+            )
+            ttk.Button(
+                role_actions,
+                text="Keep Current",
+                command=lambda i=idx: self._assign_preset_role(i, clear=True),
+            ).pack(side=tk.LEFT)
+
             actions = ttk.Frame(pane)
-            actions.grid(row=2, column=0, columnspan=2, sticky="ew")
+            actions.grid(row=3, column=0, columnspan=2, sticky="ew")
             ttk.Button(actions, text="Select All", command=lambda i=idx: self._select_all_preset_names(i)).pack(
                 side=tk.LEFT, padx=(0, 6)
             )
@@ -1305,6 +1594,9 @@ class SerialTesterApp(tk.Tk):
                 self.preset_configs[idx]["names"] = self._get_selected_names_from_listbox(self.preset_name_listboxes[idx])
             else:
                 self.preset_configs[idx]["names"] = normalize_name_list(self.preset_configs[idx].get("names", []))
+            self.preset_configs[idx]["rs232_roles"] = normalize_preset_roles(
+                self.preset_configs[idx].get("rs232_roles", {})
+            )
             self.preset_configs[idx].pop("ports", None)
         self._refresh_preset_button_labels()
 
@@ -1325,6 +1617,12 @@ class SerialTesterApp(tk.Tk):
                     updated_names.append(selected_name)
             if changed:
                 preset["names"] = normalize_name_list(updated_names)
+
+            updated_roles: dict[str, str] = {}
+            for configured_name, mode in normalize_preset_roles(preset.get("rs232_roles", {})).items():
+                role_name = new_name if normalize_name_key(configured_name) == old_key else configured_name
+                updated_roles[role_name] = mode
+            preset["rs232_roles"] = updated_roles
 
     def _preset_selected_name_keys(self, idx: int) -> set[str]:
         if not (0 <= idx < len(self.preset_configs)):
@@ -1350,6 +1648,7 @@ class SerialTesterApp(tk.Tk):
         disabled_count = 0
         stopped = 0
         started = 0
+        roles_changed = 0
         rs232_was_running = bool(self.rs232_workers)
         rs485_was_running = bool(self.rs485_workers)
         self.active_preset_idx = idx
@@ -1359,6 +1658,13 @@ class SerialTesterApp(tk.Tk):
             cfg = self.rs232_configs[rs232_idx]
             should_enable = self._rs232_in_name_set(rs232_idx, selected_names)
             cfg["enabled"] = should_enable
+            preset_role = self._preset_role_for_name(preset, cfg["name"]) if should_enable else None
+            if preset_role is not None and cfg.get("mode") != preset_role:
+                cfg["mode"] = preset_role
+                roles_changed += 1
+                if rs232_idx in self.rs232_workers:
+                    self.stop_single_test("rs232", rs232_idx, log_event=False, refresh_health=False)
+                    stopped += 1
             if should_enable:
                 enabled_count += 1
             else:
@@ -1411,12 +1717,14 @@ class SerialTesterApp(tk.Tk):
                         )
                         started += 1
 
+        self._refresh_preset_name_options(show_message=False)
         self.save_settings(show_message=False)
         self._rebuild_overview_rows()
         self._refresh_health_panel()
         self.append_log(
             f'Preset "{preset["name"]}" applied '
-            f"({enabled_count} enabled, {disabled_count} disabled, {stopped} stopped, {started} started)."
+            f"({enabled_count} enabled, {disabled_count} disabled, {roles_changed} roles changed, "
+            f"{stopped} stopped, {started} started)."
         )
 
     def _build_health_tab(self, parent: ttk.Frame) -> None:
@@ -1544,11 +1852,11 @@ class SerialTesterApp(tk.Tk):
         if group == "rs232":
             cfg = self.rs232_configs[idx]
             channel = f"RS232 #{idx + 1}"
-            ports = cfg["port"]
+            ports = rs232_port_role_text(cfg)
         else:
             cfg = self.rs485_configs[idx]
             channel = f"RS485 #{idx + 1}"
-            ports = f'{cfg["sender_port"]} <-> {cfg["echo_port"]}'
+            ports = cfg["sender_port"]
 
         stamp = time.strftime("%Y-%m-%d %H:%M:%S")
         record = (
@@ -1617,12 +1925,12 @@ class SerialTesterApp(tk.Tk):
         for idx, state in enumerate(self.rs232_state):
             if state["status"] in {"FAIL", "ERROR"}:
                 cfg = self.rs232_configs[idx]
-                current_issues.append(("RS232", cfg["name"], cfg["port"], state["status"], state["last"]))
+                current_issues.append(("RS232", cfg["name"], rs232_port_role_text(cfg), state["status"], state["last"]))
         for idx, state in enumerate(self.rs485_state):
             if state["status"] in {"FAIL", "ERROR"}:
                 cfg = self.rs485_configs[idx]
                 current_issues.append(
-                    ("RS485", cfg["name"], f'{cfg["sender_port"]} <-> {cfg["echo_port"]}', state["status"], state["last"])
+                    ("RS485", cfg["name"], cfg["sender_port"], state["status"], state["last"])
                 )
 
         fault_review_count = len(self.fault_records)
@@ -1656,7 +1964,7 @@ class SerialTesterApp(tk.Tk):
         parent.columnconfigure(0, weight=1)
         parent.rowconfigure(0, weight=1)
 
-        columns = ("idx", "enabled", "name", "port", "status", "pass", "fail", "last")
+        columns = ("idx", "enabled", "name", "port", "mode", "status", "pass", "fail", "last")
         tree = ttk.Treeview(parent, columns=columns, show="headings", height=24)
 
         headings = {
@@ -1664,6 +1972,7 @@ class SerialTesterApp(tk.Tk):
             "enabled": "Enabled",
             "name": "Name",
             "port": "Port",
+            "mode": "Role",
             "status": "Status",
             "pass": "Pass",
             "fail": "Fail",
@@ -1674,6 +1983,7 @@ class SerialTesterApp(tk.Tk):
             "enabled": 70,
             "name": 180,
             "port": 90,
+            "mode": 120,
             "status": 90,
             "pass": 70,
             "fail": 70,
@@ -1682,7 +1992,7 @@ class SerialTesterApp(tk.Tk):
 
         for col in columns:
             tree.heading(col, text=headings[col])
-            tree.column(col, width=widths[col], anchor=tk.W if col in {"name", "last"} else tk.CENTER)
+            tree.column(col, width=widths[col], anchor=tk.W if col in {"name", "mode", "last"} else tk.CENTER)
 
         yscroll = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=tree.yview)
         tree.configure(yscrollcommand=yscroll.set)
@@ -1813,7 +2123,7 @@ class SerialTesterApp(tk.Tk):
                 idx,
                 "RS232",
                 self.rs232_configs[idx]["name"],
-                self.rs232_configs[idx]["port"],
+                rs232_port_role_text(self.rs232_configs[idx]),
             )
             overview_idx += 1
 
@@ -1830,7 +2140,7 @@ class SerialTesterApp(tk.Tk):
                 idx,
                 "RS485",
                 cfg["name"],
-                f'{cfg["sender_port"]} <-> {cfg["echo_port"]}',
+                cfg["sender_port"],
             )
             overview_idx += 1
 
@@ -1968,7 +2278,9 @@ class SerialTesterApp(tk.Tk):
             if (group, idx) in self.channel_fault_history:
                 return ("#8B5CF6", "Recovered")
             return ("#22C55E", "Good")
-        if upper in {"FAIL", "ERROR"}:
+        if upper == "ERROR":
+            return ("#DC2626", "Port Error")
+        if upper == "FAIL":
             return ("#DC2626", "Wrong Message")
         return ("#F0B429", "Standby")
 
@@ -1980,11 +2292,11 @@ class SerialTesterApp(tk.Tk):
         if group == "rs232":
             cfg = self.rs232_configs[idx]
             state = self.rs232_state[idx]
-            ports = cfg["port"]
+            ports = rs232_port_role_text(cfg)
         else:
             cfg = self.rs485_configs[idx]
             state = self.rs485_state[idx]
-            ports = f'{cfg["sender_port"]} <-> {cfg["echo_port"]}'
+            ports = cfg["sender_port"]
 
         color, state_text = self._status_to_overview_state(group, idx, state["status"])
         row["name_var"].set(cfg["name"])
@@ -2006,15 +2318,14 @@ class SerialTesterApp(tk.Tk):
         parent.columnconfigure(0, weight=1)
         parent.rowconfigure(0, weight=1)
 
-        columns = ("idx", "enabled", "name", "sender", "echo", "status", "pass", "fail", "last")
+        columns = ("idx", "enabled", "name", "port", "status", "pass", "fail", "last")
         tree = ttk.Treeview(parent, columns=columns, show="headings", height=10)
 
         headings = {
             "idx": "#",
             "enabled": "Enabled",
             "name": "Name",
-            "sender": "Sender Port",
-            "echo": "Echo Port",
+            "port": "RS485 Port",
             "status": "Status",
             "pass": "Pass",
             "fail": "Fail",
@@ -2024,8 +2335,7 @@ class SerialTesterApp(tk.Tk):
             "idx": 45,
             "enabled": 70,
             "name": 180,
-            "sender": 110,
-            "echo": 110,
+            "port": 120,
             "status": 90,
             "pass": 70,
             "fail": 70,
@@ -2086,7 +2396,7 @@ class SerialTesterApp(tk.Tk):
         count_row.grid(row=0, column=0, sticky="e")
         ttk.Label(count_row, text="RS232 count").pack(side=tk.LEFT)
         ttk.Entry(count_row, textvariable=self.rs232_count_var, width=6).pack(side=tk.LEFT, padx=(6, 14))
-        ttk.Label(count_row, text="RS485 pair count").pack(side=tk.LEFT)
+        ttk.Label(count_row, text="RS485 count").pack(side=tk.LEFT)
         ttk.Entry(count_row, textvariable=self.rs485_count_var, width=6).pack(side=tk.LEFT, padx=(6, 10))
         ttk.Button(count_row, text="Apply Counts", command=self.apply_channel_counts).pack(side=tk.LEFT)
 
@@ -2127,7 +2437,7 @@ class SerialTesterApp(tk.Tk):
         if hasattr(self, "rs232_section_title_var"):
             self.rs232_section_title_var.set(f"RS232 Port Settings ({len(self.rs232_configs)} ports)")
         if hasattr(self, "rs485_section_title_var"):
-            self.rs485_section_title_var.set(f"RS485 Pair Settings ({len(self.rs485_configs)} pairs)")
+            self.rs485_section_title_var.set(f"RS485 Port Settings ({len(self.rs485_configs)} ports)")
 
     def _apply_resized_channels(self, new_rs232_count: int, new_rs485_count: int) -> None:
         old_rs232_count = len(self.rs232_configs)
@@ -2189,7 +2499,7 @@ class SerialTesterApp(tk.Tk):
             self.rs232_count_var.set(str(len(self.rs232_configs)))
             return
         if not (0 <= new_rs485_count <= MAX_RS485_PAIR_COUNT):
-            messagebox.showerror("Invalid RS485 count", f"RS485 pair count must be between 0 and {MAX_RS485_PAIR_COUNT}.")
+            messagebox.showerror("Invalid RS485 count", f"RS485 count must be between 0 and {MAX_RS485_PAIR_COUNT}.")
             self.rs485_count_var.set(str(len(self.rs485_configs)))
             return
 
@@ -2220,7 +2530,7 @@ class SerialTesterApp(tk.Tk):
 
         self._apply_resized_channels(new_rs232_count, new_rs485_count)
         self.save_settings(show_message=False)
-        self.append_log(f"Channel counts updated: RS232={new_rs232_count}, RS485 pairs={new_rs485_count}.")
+        self.append_log(f"Channel counts updated: RS232={new_rs232_count}, RS485={new_rs485_count}.")
 
     def _set_all_ports_enabled(self, enabled: bool) -> None:
         action_word = "enable" if enabled else "disable"
@@ -2387,7 +2697,7 @@ class SerialTesterApp(tk.Tk):
         table_wrap.columnconfigure(0, weight=1)
         table_wrap.rowconfigure(0, weight=1)
 
-        columns = ("idx", "enabled", "name", "port", "baud", "payload", "interval", "timeout")
+        columns = ("idx", "enabled", "name", "port", "mode", "paro_id", "baud", "payload", "interval", "timeout")
         self.rs232_settings_tree = ttk.Treeview(table_wrap, columns=columns, show="headings", height=10, selectmode="browse")
 
         headings = {
@@ -2395,6 +2705,8 @@ class SerialTesterApp(tk.Tk):
             "enabled": "Enabled",
             "name": "Name",
             "port": "Port",
+            "mode": "Role",
+            "paro_id": "PARO ID",
             "baud": "Baud",
             "payload": "Payload Hex",
             "interval": "Interval ms",
@@ -2405,6 +2717,8 @@ class SerialTesterApp(tk.Tk):
             "enabled": 70,
             "name": 180,
             "port": 90,
+            "mode": 115,
+            "paro_id": 65,
             "baud": 90,
             "payload": 130,
             "interval": 95,
@@ -2429,6 +2743,8 @@ class SerialTesterApp(tk.Tk):
         self.rs232_var_enabled = tk.BooleanVar(value=True)
         self.rs232_var_name = tk.StringVar()
         self.rs232_var_port = tk.StringVar()
+        self.rs232_var_mode = tk.StringVar(value=RS232_MODE_OPTIONS[0])
+        self.rs232_var_paro_id = tk.StringVar(value=str(DEFAULT_PARO_DEVICE_ID))
         self.rs232_var_baud = tk.StringVar(value=str(DEFAULT_BAUDRATE))
         self.rs232_var_bytesize = tk.StringVar(value="8")
         self.rs232_var_parity = tk.StringVar(value="N")
@@ -2442,7 +2758,7 @@ class SerialTesterApp(tk.Tk):
         row += 1
         self._labeled_entry(editor, "Name", self.rs232_var_name, row)
         row += 1
-        ttk.Label(editor, text="Port").grid(row=row, column=0, sticky="w", pady=2)
+        ttk.Label(editor, text="Port / socket URL").grid(row=row, column=0, sticky="w", pady=2)
         self.rs232_port_combo = ttk.Combobox(
             editor,
             textvariable=self.rs232_var_port,
@@ -2450,6 +2766,10 @@ class SerialTesterApp(tk.Tk):
             state="normal",
         )
         self.rs232_port_combo.grid(row=row, column=1, sticky="ew", pady=2)
+        row += 1
+        self._labeled_combobox(editor, "Role", self.rs232_var_mode, RS232_MODE_OPTIONS, row)
+        row += 1
+        self._labeled_entry(editor, "PARO Device ID (00-99)", self.rs232_var_paro_id, row)
         row += 1
         self._labeled_entry(editor, "Baudrate", self.rs232_var_baud, row)
         row += 1
@@ -2493,8 +2813,7 @@ class SerialTesterApp(tk.Tk):
             "idx",
             "enabled",
             "name",
-            "sender",
-            "echo",
+            "port",
             "baud",
             "payload",
             "interval",
@@ -2506,8 +2825,7 @@ class SerialTesterApp(tk.Tk):
             "idx": "#",
             "enabled": "Enabled",
             "name": "Name",
-            "sender": "Sender",
-            "echo": "Echo",
+            "port": "RS485 Port",
             "baud": "Baud",
             "payload": "Payload Hex",
             "interval": "Interval ms",
@@ -2517,8 +2835,7 @@ class SerialTesterApp(tk.Tk):
             "idx": 45,
             "enabled": 70,
             "name": 180,
-            "sender": 90,
-            "echo": 90,
+            "port": 100,
             "baud": 80,
             "payload": 120,
             "interval": 90,
@@ -2536,14 +2853,13 @@ class SerialTesterApp(tk.Tk):
         rs485_scroll.grid(row=0, column=1, sticky="ns")
         self.rs485_settings_tree.bind("<<TreeviewSelect>>", self._on_rs485_settings_select)
 
-        editor = ttk.LabelFrame(parent, text="Edit Selected RS485 Pair", padding=10)
+        editor = ttk.LabelFrame(parent, text="Edit Selected RS485 Port", padding=10)
         editor.grid(row=1, column=1, sticky="nsew")
         editor.columnconfigure(1, weight=1)
 
         self.rs485_var_enabled = tk.BooleanVar(value=True)
         self.rs485_var_name = tk.StringVar()
         self.rs485_var_sender = tk.StringVar()
-        self.rs485_var_echo = tk.StringVar()
         self.rs485_var_baud = tk.StringVar(value=str(DEFAULT_BAUDRATE))
         self.rs485_var_bytesize = tk.StringVar(value="8")
         self.rs485_var_parity = tk.StringVar(value="N")
@@ -2557,7 +2873,7 @@ class SerialTesterApp(tk.Tk):
         row += 1
         self._labeled_entry(editor, "Name", self.rs485_var_name, row)
         row += 1
-        ttk.Label(editor, text="Sender Port").grid(row=row, column=0, sticky="w", pady=2)
+        ttk.Label(editor, text="RS485 port / socket URL").grid(row=row, column=0, sticky="w", pady=2)
         self.rs485_sender_combo = ttk.Combobox(
             editor,
             textvariable=self.rs485_var_sender,
@@ -2565,15 +2881,6 @@ class SerialTesterApp(tk.Tk):
             state="normal",
         )
         self.rs485_sender_combo.grid(row=row, column=1, sticky="ew", pady=2)
-        row += 1
-        ttk.Label(editor, text="Echo Port").grid(row=row, column=0, sticky="w", pady=2)
-        self.rs485_echo_combo = ttk.Combobox(
-            editor,
-            textvariable=self.rs485_var_echo,
-            values=self.com_port_values,
-            state="normal",
-        )
-        self.rs485_echo_combo.grid(row=row, column=1, sticky="ew", pady=2)
         row += 1
         self._labeled_entry(editor, "Baudrate", self.rs485_var_baud, row)
         row += 1
@@ -2596,7 +2903,7 @@ class SerialTesterApp(tk.Tk):
         row += 1
         ttk.Button(
             editor,
-            text="Apply To All RS485 (Keep Name/Ports)",
+            text="Apply To All RS485 (Keep Name/Port)",
             command=self.apply_rs485_common_changes_to_all,
         ).grid(row=row, column=0, columnspan=2, sticky="ew", pady=(6, 0))
 
@@ -2666,6 +2973,7 @@ class SerialTesterApp(tk.Tk):
                     "Yes" if cfg["enabled"] else "No",
                     cfg["name"],
                     cfg["port"],
+                    rs232_mode_label(cfg.get("mode")),
                     state["status"],
                     state["pass_count"],
                     state["fail_count"],
@@ -2681,6 +2989,8 @@ class SerialTesterApp(tk.Tk):
                     "Yes" if cfg["enabled"] else "No",
                     cfg["name"],
                     cfg["port"],
+                    rs232_mode_label(cfg.get("mode")),
+                    f'{int(cfg.get("paro_device_id", DEFAULT_PARO_DEVICE_ID)):02d}',
                     cfg["baudrate"],
                     cfg["payload_hex"],
                     cfg["interval_ms"],
@@ -2708,7 +3018,6 @@ class SerialTesterApp(tk.Tk):
                     "Yes" if cfg["enabled"] else "No",
                     cfg["name"],
                     cfg["sender_port"],
-                    cfg["echo_port"],
                     state["status"],
                     state["pass_count"],
                     state["fail_count"],
@@ -2724,7 +3033,6 @@ class SerialTesterApp(tk.Tk):
                     "Yes" if cfg["enabled"] else "No",
                     cfg["name"],
                     cfg["sender_port"],
-                    cfg["echo_port"],
                     cfg["baudrate"],
                     cfg["payload_hex"],
                     cfg["interval_ms"],
@@ -2752,6 +3060,8 @@ class SerialTesterApp(tk.Tk):
         self.rs232_var_enabled.set(bool(cfg["enabled"]))
         self.rs232_var_name.set(str(cfg["name"]))
         self.rs232_var_port.set(str(cfg["port"]))
+        self.rs232_var_mode.set(rs232_mode_label(cfg.get("mode")))
+        self.rs232_var_paro_id.set(str(cfg.get("paro_device_id", DEFAULT_PARO_DEVICE_ID)))
         self.rs232_var_baud.set(str(cfg["baudrate"]))
         self.rs232_var_bytesize.set(str(cfg["bytesize"]))
         self.rs232_var_parity.set(str(cfg["parity"]))
@@ -2769,7 +3079,6 @@ class SerialTesterApp(tk.Tk):
         self.rs485_var_enabled.set(bool(cfg["enabled"]))
         self.rs485_var_name.set(str(cfg["name"]))
         self.rs485_var_sender.set(str(cfg["sender_port"]))
-        self.rs485_var_echo.set(str(cfg["echo_port"]))
         self.rs485_var_baud.set(str(cfg["baudrate"]))
         self.rs485_var_bytesize.set(str(cfg["bytesize"]))
         self.rs485_var_parity.set(str(cfg["parity"]))
@@ -2821,7 +3130,14 @@ class SerialTesterApp(tk.Tk):
 
         try:
             name = self.rs232_var_name.get().strip() or f"RS232 {idx + 1}"
-            port = self.rs232_var_port.get().strip().upper()
+            port = normalize_port_text(self.rs232_var_port.get())
+            mode = rs232_mode_value(self.rs232_var_mode.get())
+            try:
+                paro_device_id = int(self.rs232_var_paro_id.get().strip())
+            except ValueError as exc:
+                raise ValueError("PARO Device ID must be a whole number from 00 to 99.") from exc
+            if not (0 <= paro_device_id <= 99):
+                raise ValueError("PARO Device ID must be between 00 and 99.")
 
             common_values = self._read_rs232_common_editor_values()
         except ValueError as exc:
@@ -2836,6 +3152,8 @@ class SerialTesterApp(tk.Tk):
             {
                 "name": name,
                 "port": port,
+                "mode": mode,
+                "paro_device_id": paro_device_id,
                 **common_values,
             }
         )
@@ -2957,9 +3275,8 @@ class SerialTesterApp(tk.Tk):
             return
 
         try:
-            name = self.rs485_var_name.get().strip() or f"RS485 Pair {idx + 1}"
-            sender_port = self.rs485_var_sender.get().strip().upper()
-            echo_port = self.rs485_var_echo.get().strip().upper()
+            name = self.rs485_var_name.get().strip() or f"RS485 {idx + 1}"
+            sender_port = normalize_port_text(self.rs485_var_sender.get())
 
             common_values = self._read_rs485_common_editor_values()
         except ValueError as exc:
@@ -2974,7 +3291,6 @@ class SerialTesterApp(tk.Tk):
             {
                 "name": name,
                 "sender_port": sender_port,
-                "echo_port": echo_port,
                 **common_values,
             }
         )
@@ -2983,23 +3299,23 @@ class SerialTesterApp(tk.Tk):
         worker_config_changed = any(cfg.get(key) != worker_config_before[key] for key in RS485_WORKER_CONFIG_KEYS)
         if was_running and worker_config_changed:
             self.stop_single_test("rs485", idx, log_event=False, refresh_health=False)
-            if self._is_rs485_startable(idx):
-                self.start_single_test(
-                    "rs485",
-                    idx,
-                    startup_delay_s=0.0,
-                    reset_counts=False,
-                    log_event=False,
-                    refresh_health=False,
-                )
         else:
             self._stop_rs485_worker_if_disabled(idx)
+        if was_running and worker_config_changed and self._is_rs485_startable(idx):
+            self.start_single_test(
+                "rs485",
+                idx,
+                startup_delay_s=0.0,
+                reset_counts=False,
+                log_event=False,
+                refresh_health=False,
+            )
         self.refresh_rs485_row(idx)
         self._refresh_preset_name_options(show_message=False)
         self._rebuild_overview_rows()
         self._queue_health_refresh()
         self.save_settings(show_message=False)
-        self.append_log(f"RS485 Pair #{idx + 1} settings updated.")
+        self.append_log(f"RS485 #{idx + 1} settings updated.")
 
     def apply_rs485_common_changes_to_all(self) -> None:
         try:
@@ -3010,7 +3326,7 @@ class SerialTesterApp(tk.Tk):
 
         answer = messagebox.askyesno(
             "Apply to all RS485",
-            "Apply the selected RS485 settings to all pairs while keeping each Name, Sender Port, and Echo Port unchanged?",
+            "Apply the selected RS485 settings to all ports while keeping each Name and Port unchanged?",
         )
         if not answer:
             return
@@ -3030,6 +3346,7 @@ class SerialTesterApp(tk.Tk):
 
         for idx in changed_running_indices:
             self.stop_single_test("rs485", idx, log_event=False, refresh_health=False)
+
         for idx in changed_running_indices:
             if self._is_rs485_startable(idx):
                 self.start_single_test(
@@ -3043,12 +3360,11 @@ class SerialTesterApp(tk.Tk):
 
         self._queue_health_refresh()
         self.save_settings(show_message=False)
-        self.append_log("Applied RS485 common settings to all pairs (Name/Ports kept).")
+        self.append_log("Applied RS485 common settings to all ports (Name/Port kept).")
 
     def _stop_rs485_worker_if_disabled(self, idx: int) -> None:
         cfg = self.rs485_configs[idx]
-        has_ports = bool(str(cfg["sender_port"]).strip()) and bool(str(cfg["echo_port"]).strip())
-        is_disabled = (not cfg["enabled"]) or (not has_ports)
+        is_disabled = (not cfg["enabled"]) or (not str(cfg["sender_port"]).strip())
         if not is_disabled:
             return
 
@@ -3060,7 +3376,7 @@ class SerialTesterApp(tk.Tk):
 
     def _is_rs485_startable(self, idx: int) -> bool:
         cfg = self.rs485_configs[idx]
-        return bool(cfg["enabled"]) and bool(str(cfg["sender_port"]).strip()) and bool(str(cfg["echo_port"]).strip())
+        return bool(cfg["enabled"]) and bool(str(cfg["sender_port"]).strip())
 
     def _resolved_startup_delay(self, startup_delay_s: float | None) -> float:
         if startup_delay_s is None:
@@ -3135,12 +3451,12 @@ class SerialTesterApp(tk.Tk):
                 self.rs485_workers[idx] = worker
                 worker.start()
                 if log_event:
-                    self.append_log(f"RS485 Pair #{idx + 1} started.")
+                    self.append_log(f"RS485 #{idx + 1} started.")
             else:
                 state["status"] = "Disabled"
-                state["last"] = "Disabled in settings" if not cfg["enabled"] else "Disabled (missing sender/echo port)"
+                state["last"] = "Disabled in settings" if not cfg["enabled"] else "Disabled (no port selected)"
                 if log_event:
-                    self.append_log(f"RS485 Pair #{idx + 1} not started ({state['last']}).")
+                    self.append_log(f"RS485 #{idx + 1} not started ({state['last']}).")
 
             self.refresh_rs485_row(idx, include_settings=False)
         else:
@@ -3181,10 +3497,10 @@ class SerialTesterApp(tk.Tk):
                 state["last"] = "Stopped by user"
             else:
                 state["status"] = "Disabled"
-                state["last"] = "Disabled in settings" if not cfg["enabled"] else "Disabled (missing sender/echo port)"
+                state["last"] = "Disabled in settings" if not cfg["enabled"] else "Disabled (no port selected)"
             self.refresh_rs485_row(idx)
             if log_event and worker is not None:
-                self.append_log(f"RS485 Pair #{idx + 1} stopped.")
+                self.append_log(f"RS485 #{idx + 1} stopped.")
         else:
             raise ValueError(f"Unsupported group: {group}")
 
@@ -3239,7 +3555,7 @@ class SerialTesterApp(tk.Tk):
             )
 
         self._refresh_health_panel()
-        self.append_log("RS485 pair workers started.")
+        self.append_log("RS485 workers started.")
 
     def stop_rs485_tests(self) -> None:
         if not self.rs485_workers:
@@ -3251,7 +3567,7 @@ class SerialTesterApp(tk.Tk):
             self.stop_single_test("rs485", idx, log_event=False, refresh_health=False)
 
         self._refresh_health_panel()
-        self.append_log("RS485 pair workers stopped.")
+        self.append_log("RS485 workers stopped.")
 
     def _queue_live_refresh(self, group: str, idx: int) -> None:
         if group == "rs232":
@@ -3382,7 +3698,7 @@ class SerialTesterApp(tk.Tk):
         self.after(delay_ms, self._process_worker_events)
 
     def _append_worker_event_log(self, group: str, idx: int, status: str, last: str) -> None:
-        label = f"RS232 #{idx + 1}" if group == "rs232" else f"RS485 Pair #{idx + 1}"
+        label = f"RS232 #{idx + 1}" if group == "rs232" else f"RS485 #{idx + 1}"
         if status != "FAIL":
             self.append_log(f"{label}: {status} - {last}")
             return

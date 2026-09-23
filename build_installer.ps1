@@ -5,37 +5,69 @@ param(
 $ErrorActionPreference = "Stop"
 Set-Location -Path $PSScriptRoot
 
-$appVersion = "1.2.0"
+$appVersion = "1.3.0"
 $portableBaseName = "SerialLoopbackTester-v$appVersion-portable"
+$portableZipName = "$portableBaseName.zip"
 $installerBaseName = "SerialLoopbackTester-v$appVersion-installer"
+$legacyPortableExePath = Join-Path $PSScriptRoot ("dist\\{0}.exe" -f $portableBaseName)
+
+if (Test-Path $legacyPortableExePath) {
+    Remove-Item -LiteralPath $legacyPortableExePath -Force
+}
 
 Write-Host "Installing Python dependencies..."
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt -r requirements-build.txt
+
+Write-Host "Running tests..."
+python -m unittest discover -s tests
 
 Write-Host "Building EXE with PyInstaller..."
 python -m PyInstaller `
     --noconfirm `
     --clean `
     --noupx `
-    --onefile `
+    --onedir `
     --windowed `
+    --hidden-import serial.urlhandler.protocol_socket `
     --name $portableBaseName `
     serial_tester_gui.py
 
-$oneFileExePath = Join-Path $PSScriptRoot ("dist\\{0}.exe" -f $portableBaseName)
-$oneDirExePath = Join-Path $PSScriptRoot ("dist\\{0}\\{0}.exe" -f $portableBaseName)
+$portableDirPath = Join-Path $PSScriptRoot ("dist\\{0}" -f $portableBaseName)
+$exePath = Join-Path $portableDirPath ("{0}.exe" -f $portableBaseName)
+$portableZipPath = Join-Path $PSScriptRoot ("dist\\{0}" -f $portableZipName)
 
-if (Test-Path $oneFileExePath) {
-    $exePath = $oneFileExePath
-} elseif (Test-Path $oneDirExePath) {
-    Copy-Item -Path $oneDirExePath -Destination $oneFileExePath -Force
-    $exePath = $oneFileExePath
-} else {
-    throw "Build failed: EXE was not created in dist\\ (expected $oneFileExePath or $oneDirExePath)"
+if (-not (Test-Path $exePath)) {
+    throw "Build failed: folder-mode EXE was not created at $exePath"
 }
 
-Write-Host "Portable EXE ready: $exePath"
+Write-Host "Creating inspectable portable ZIP..."
+$zipCreated = $false
+for ($attempt = 1; $attempt -le 10; $attempt++) {
+    try {
+        Compress-Archive `
+            -Path (Join-Path $portableDirPath "*") `
+            -DestinationPath $portableZipPath `
+            -CompressionLevel Optimal `
+            -Force `
+            -ErrorAction Stop
+        $zipCreated = $true
+        break
+    } catch {
+        if ($attempt -eq 10) {
+            throw
+        }
+        Write-Warning "Portable files are temporarily locked; retrying ZIP creation ($attempt/10)..."
+        Start-Sleep -Milliseconds 750
+    }
+}
+
+if (-not $zipCreated) {
+    throw "Build failed: portable ZIP was not created at $portableZipPath"
+}
+
+Write-Host "Portable folder ready: $portableDirPath"
+Write-Host "Portable ZIP ready: $portableZipPath"
 
 if ($SkipInno) {
     Write-Host "Skipping installer packaging because -SkipInno was supplied."
@@ -63,7 +95,7 @@ if (-not $iscc) {
 
 if (-not $iscc) {
     Write-Warning "Inno Setup was not found. Install Inno Setup 6 to build a Setup installer."
-    Write-Host "EXE build is complete and usable."
+    Write-Host "Portable folder and ZIP builds are complete and usable."
     exit 0
 }
 
