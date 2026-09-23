@@ -5,6 +5,7 @@ import json
 import math
 import os
 import queue
+import re
 import shutil
 import sys
 import threading
@@ -37,7 +38,7 @@ MAX_WORKER_EVENTS_DURING_WINDOW_MOTION = 50
 WINDOW_CONFIGURE_SETTLE_MS = 180
 MAX_LOG_LINES = 1200
 WORKER_JOIN_TIMEOUT_S = 0.75
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.1"
 APP_PUBLISHER = "PoldenTEK"
 SETTINGS_FILENAME = "serial_tester_settings.json"
 DEFAULT_BAUDRATE = 19200
@@ -590,6 +591,33 @@ def default_settings() -> dict:
     }
 
 
+def add_first_launch_linux_ports(settings: dict, detected_ports: list[str]) -> int:
+    """Assign every detected Linux serial device once without enabling transmission."""
+    if not sys.platform.startswith("linux"):
+        return 0
+
+    ports: list[str] = []
+    seen: set[str] = set()
+    for value in detected_ports:
+        port = normalize_port_text(value)
+        if port and port not in seen:
+            seen.add(port)
+            ports.append(port)
+
+    rs232_ports = settings["rs232_ports"]
+    while len(rs232_ports) < min(len(ports), MAX_RS232_COUNT):
+        rs232_ports.append(default_rs232_item(len(rs232_ports)))
+
+    assigned = 0
+    for index, port in enumerate(ports[:MAX_RS232_COUNT]):
+        rs232_ports[index]["port"] = port
+        rs232_ports[index]["enabled"] = False
+        assigned += 1
+
+    settings["ui"]["rs232_count"] = len(rs232_ports)
+    return assigned
+
+
 def normalize_settings(raw: object) -> dict:
     source = raw if isinstance(raw, dict) else {}
     raw_rs232 = source.get("rs232_ports", [])
@@ -1076,7 +1104,23 @@ class SerialTesterApp(tk.Tk):
         self.minsize(1200, 720)
 
         self.settings_path = resolve_settings_path()
+        is_first_launch = not self.settings_path.exists()
         self.settings = load_settings_file(self.settings_path)
+
+        self.first_launch_linux_ports_added = 0
+        if is_first_launch and sys.platform.startswith("linux"):
+            try:
+                detected_ports = sorted(
+                    {normalize_port_text(item.device) for item in list_ports.comports() if item.device},
+                    key=self._com_port_sort_key,
+                )
+                self.first_launch_linux_ports_added = add_first_launch_linux_ports(self.settings, detected_ports)
+                if self.first_launch_linux_ports_added:
+                    save_settings_file(self.settings_path, self.settings)
+            except Exception:
+                # Port discovery is retried by the normal refresh flow. A broken
+                # driver must not prevent the application from opening.
+                self.first_launch_linux_ports_added = 0
 
         self.rs232_configs = self.settings["rs232_ports"]
         self.rs485_configs = self.settings["rs485_pairs"]
@@ -1150,6 +1194,11 @@ class SerialTesterApp(tk.Tk):
         self.refresh_com_port_options(show_message=False)
         self._populate_tables()
         self._select_first_rows()
+        if self.first_launch_linux_ports_added:
+            self.append_log(
+                f"First Linux launch: added {self.first_launch_linux_ports_added} detected serial ports. "
+                "They are disabled until you assign roles and enable them."
+            )
 
         self.set_fullscreen(bool(self.ui_settings.get("start_fullscreen", False)))
         if bool(self.ui_settings.get("auto_start_after_launch_2s", True)):
@@ -1368,12 +1417,16 @@ class SerialTesterApp(tk.Tk):
                 messagebox.showinfo("Serial port refresh", f"Detected {len(ports)} serial port(s).")
 
     @staticmethod
-    def _com_port_sort_key(port: str) -> tuple[int, int, str]:
+    def _com_port_sort_key(port: str) -> tuple[int, str, int, str]:
         text = port.strip()
         upper = text.upper()
         if upper.startswith("COM") and upper[3:].isdigit():
-            return (0, int(upper[3:]), upper)
-        return (1, 0, text.casefold())
+            return (0, "COM", int(upper[3:]), upper)
+        trailing_number = re.search(r"(\d+)$", text)
+        if trailing_number:
+            prefix = text[: trailing_number.start()].casefold()
+            return (1, prefix, int(trailing_number.group(1)), text.casefold())
+        return (2, text.casefold(), 0, text.casefold())
 
     def _collect_preset_name_options(self) -> list[dict[str, str]]:
         options: list[dict[str, str]] = []

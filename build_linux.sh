@@ -10,7 +10,7 @@ repo_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$repo_dir"
 
 python_bin="${PYTHON:-python3}"
-app_version="1.3.0"
+app_version="1.3.1"
 architecture="$(uname -m)"
 portable_name="SerialLoopbackTester-v${app_version}-linux-${architecture}"
 archive_path="${repo_dir}/dist/${portable_name}.tar.gz"
@@ -37,9 +37,13 @@ download_and_verify() {
         rm -f -- "$partial_path"
         echo "Downloading $(basename "$destination") from Moxa..."
         if command -v curl >/dev/null 2>&1; then
-            curl --fail --location --retry 3 --output "$partial_path" "$url"
+            curl --fail --location --retry 3 \
+                --user-agent "Mozilla/5.0 SerialLoopbackTester/${app_version}" \
+                --output "$partial_path" "$url"
         elif command -v wget >/dev/null 2>&1; then
-            wget --tries=3 --output-document="$partial_path" "$url"
+            wget --tries=3 \
+                --user-agent="Mozilla/5.0 SerialLoopbackTester/${app_version}" \
+                --output-document="$partial_path" "$url"
         else
             echo "curl or wget is required to bundle the Moxa driver archives." >&2
             exit 1
@@ -83,6 +87,13 @@ if [[ ! -x "$executable_path" ]]; then
 fi
 
 cp README.md "${repo_dir}/dist/${portable_name}/README.md"
+cp "${repo_dir}/start.sh" "${repo_dir}/start_as_root.sh" \
+    "${repo_dir}/run_as_root.sh" "${repo_dir}/install_serial_access.sh" \
+    "${repo_dir}/dist/${portable_name}/"
+chmod +x "${repo_dir}/dist/${portable_name}/start.sh" \
+    "${repo_dir}/dist/${portable_name}/start_as_root.sh" \
+    "${repo_dir}/dist/${portable_name}/run_as_root.sh" \
+    "${repo_dir}/dist/${portable_name}/install_serial_access.sh"
 
 bundle_driver_dir="${repo_dir}/dist/${portable_name}/drivers/moxa"
 mkdir -p "$bundle_driver_dir"

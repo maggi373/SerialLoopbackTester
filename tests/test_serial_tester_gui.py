@@ -37,6 +37,38 @@ class StopDuringReadPort:
         return b""
 
 
+class LinuxFirstLaunchPortTests(unittest.TestCase):
+    @patch.object(app_module.sys, "platform", "linux")
+    def test_first_launch_adds_all_detected_ports_disabled_and_expands_rows(self):
+        settings = app_module.default_settings()
+        ports = [f"/dev/ttyUSB{index}" for index in range(50)]
+
+        assigned = app_module.add_first_launch_linux_ports(settings, ports + [ports[0], ""])
+
+        self.assertEqual(assigned, 50)
+        self.assertEqual(len(settings["rs232_ports"]), 50)
+        self.assertEqual(settings["ui"]["rs232_count"], 50)
+        self.assertEqual([item["port"] for item in settings["rs232_ports"]], ports)
+        self.assertTrue(all(not item["enabled"] for item in settings["rs232_ports"]))
+
+    @patch.object(app_module.sys, "platform", "win32")
+    def test_first_launch_linux_assignment_does_nothing_on_other_platforms(self):
+        settings = app_module.default_settings()
+        original_port = settings["rs232_ports"][0]["port"]
+
+        assigned = app_module.add_first_launch_linux_ports(settings, ["COM99"])
+
+        self.assertEqual(assigned, 0)
+        self.assertEqual(settings["rs232_ports"][0]["port"], original_port)
+
+    def test_linux_serial_devices_sort_by_numeric_suffix(self):
+        ports = ["/dev/ttyUSB10", "/dev/ttyUSB2", "/dev/ttyUSB1"]
+
+        ordered = sorted(ports, key=app_module.SerialTesterApp._com_port_sort_key)
+
+        self.assertEqual(ordered, ["/dev/ttyUSB1", "/dev/ttyUSB2", "/dev/ttyUSB10"])
+
+
 class StopDuringReadWorker(app_module.RS232Worker):
     def open_port(self):
         return StopDuringReadPort(self)

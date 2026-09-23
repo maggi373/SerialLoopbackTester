@@ -1,5 +1,5 @@
 # Serial Loopback Tester
-Version: `1.3.0`
+Version: `1.3.1`
 Made by: `maggi373`
 
 Python GUI tool for:
@@ -68,6 +68,8 @@ sudo usermod -aG dialout "$USER"
 
 Log out and back in after changing group membership. Other distributions may use a different group; check the owner/group reported by `ls -l /dev/ttyUSB0` or the relevant device.
 
+On the first Linux launch only, the application detects all serial devices reported by pyserial, assigns them to RS232 configuration rows, expands the RS232 row count when more than 40 are present, and saves the result. Auto-added ports start disabled so no unknown RS-485 device is sent loopback traffic; assign each port's role and enable the required ports or apply a preset. Later launches preserve the saved mapping and do not auto-add newly connected devices.
+
 #### Fedora
 
 Install the runtime dependencies and run from source:
@@ -83,19 +85,36 @@ python serial_tester_gui.py
 For a downloaded Linux release, extract and run the packaged executable instead:
 
 ```bash
-tar -xzf SerialLoopbackTester-v1.3.0-linux-x86_64.tar.gz
-cd SerialLoopbackTester-v1.3.0-linux-x86_64
-./SerialLoopbackTester-v1.3.0-linux-x86_64
+tar -xzf SerialLoopbackTester-v1.3.1-linux-x86_64.tar.gz
+cd SerialLoopbackTester-v1.3.1-linux-x86_64
+./start.sh
 ```
+
+For immediate unrestricted serial-port access, use the included root startup script. It preserves the graphical-session variables needed by Tk:
+
+```bash
+./start_as_root.sh
+```
+
+Both startup scripts pass any command-line arguments through to the packaged executable. `run_as_root.sh` is also included as a compatibility alias for direct use.
+
+This runs the full application as root, so its settings may be stored under root's config directory. To make access persistent while running the application as your normal account, install the included udev rules and group membership instead:
+
+```bash
+./install_serial_access.sh
+```
+
+Then unplug/replug USB serial devices and log out and back in. The installer covers `/dev/ttyUSB*`, `/dev/ttyACM*`, and Moxa Real TTY `/dev/ttyr*` devices.
 
 Check the group assigned to the adapter and add your account to it. Fedora normally uses `dialout` for USB serial devices:
 
 ```bash
 ls -l /dev/ttyUSB0
 sudo usermod -aG dialout "$USER"
+getent group dialout
 ```
 
-Log out and back in before starting the application. Using `/dev/serial/by-id/...` in the application is recommended because `/dev/ttyUSBn` numbers can change after reconnecting devices.
+The `usermod` command above adds the currently logged-in Fedora user to `dialout`; do not replace `$USER` with `root`. Log out of the desktop completely and back in, then verify with `id -nG` before starting the application. Using `/dev/serial/by-id/...` in the application is recommended because `/dev/ttyUSBn` numbers can change after reconnecting devices.
 
 To compile the bundled Moxa kernel modules on Fedora, install the compiler and development files matching the currently running kernel:
 
@@ -136,9 +155,9 @@ Installer includes an optional checkbox to start the app with Windows (Startup f
 The default installation is per-user and does not require administrator elevation.
 
 Outputs:
-- Portable folder: `dist\SerialLoopbackTester-v1.3.0-portable\`
-- Inspectable portable ZIP: `dist\SerialLoopbackTester-v1.3.0-portable.zip`
-- Installer: `dist\installer\SerialLoopbackTester-v1.3.0-installer.exe`
+- Portable folder: `dist\SerialLoopbackTester-v1.3.1-portable\`
+- Inspectable portable ZIP: `dist\SerialLoopbackTester-v1.3.1-portable.zip`
+- Installer: `dist\installer\SerialLoopbackTester-v1.3.1-installer.exe`
 
 The portable ZIP is a standard archive that can be opened with 7-Zip or Windows Explorer. It uses PyInstaller folder mode, so the application files are visible instead of being wrapped in a self-extracting one-file executable.
 
@@ -155,11 +174,11 @@ This runs the tests and creates both a portable folder and `tar.gz` archive unde
 
 ## Automated GitHub releases
 
-The workflow in `.github/workflows/release.yml` builds and publishes release files when a version tag is pushed. The tag must match `APP_VERSION`; for this release:
+The workflow in `.github/workflows/release.yml` builds and publishes release files when a GitHub release is published or a version tag is pushed. Both `1.3.1` and `v1.3.1` tag styles are accepted, but the numeric version must match `APP_VERSION`; for this release:
 
 ```bash
-git tag v1.3.0
-git push origin v1.3.0
+git tag v1.3.1
+git push origin v1.3.1
 ```
 
 The GitHub release receives:
@@ -171,6 +190,8 @@ The GitHub release receives:
 - `SHA256SUMS.txt` covering every uploaded file
 
 Running the workflow manually builds downloadable workflow artifacts but intentionally does not create an untagged GitHub release.
+
+To repair an existing release, run **Build release** manually and enter its tag in the `release_tag` field. The workflow checks out that tag and uploads/replaces all release assets.
 
 ## Moxa on Linux
 
@@ -249,6 +270,7 @@ Both driver installers check for root access, Linux 6.x, matching kernel headers
    - When that protocol group is already running, newly selected channels start automatically and selected running channels continue.
    - Applying a preset while tests are idle only changes enablement; it does not start communications.
 21. Use **Refresh Port List** to reload dropdown values from system ports; manual values are still allowed (including blank/duplicate/custom values, Linux `/dev/serial/by-id/...` paths, and raw TCP URLs such as `socket://192.168.1.50:4001`).
+    - On Linux, automatic assignment happens only when no settings file exists. Refreshing later updates dropdown choices but does not change configured rows.
 
 ## Settings file
 - Windows settings path (script + EXE): `%USERPROFILE%\Documents\SerialLoopbackTester\serial_tester_settings.json`.
