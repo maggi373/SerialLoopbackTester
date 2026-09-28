@@ -1,0 +1,48 @@
+--- a/driver/mxu11x0.c
++++ b/driver/mxu11x0.c
+@@ -181,7 +181,9 @@
+ #endif
+ #endif	
+ #endif
+-#if(LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27))
++#if(LINUX_VERSION_CODE >= KERNEL_VERSION(6,0,0))
++static int mxu1_break(struct tty_struct *tty, int break_state);
++#elif(LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27))
+ static int mxu1_tiocmget(struct usb_serial_port *port, struct file *file);
+ static int mxu1_tiocmset(struct usb_serial_port *port, struct file *file,
+ 	unsigned int set, unsigned int clear);
+@@ -1730,7 +1732,11 @@
+ 	return mxu1_set_mcr(mxport, mcr);
+ }
+ 
+-#if(LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27))
++#if(LINUX_VERSION_CODE >= KERNEL_VERSION(6,0,0))
++static int mxu1_break(struct tty_struct *tty, int break_state)
++{
++	struct usb_serial_port *port = tty->driver_data;
++#elif(LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27))
+ static void mxu1_break(struct usb_serial_port *port, int break_state)
+ {
+ #else
+@@ -1743,7 +1749,11 @@
+ 	dbg("%s - state = %d", __FUNCTION__, break_state);
+ 
+ 	if (mxport == NULL)
++#if(LINUX_VERSION_CODE >= KERNEL_VERSION(6,0,0))
++		return -ENODEV;
++#else
+ 		return;
++#endif
+ 
+ 	mxu1_drain(mxport, (mxport->mxp_closing_wait*HZ)/100, 0);
+ 
+@@ -1757,6 +1767,9 @@
+ #else
+ 	mxu1_set_termios(NULL, mxport->mxp_port,NULL);
+ #endif	
++#if(LINUX_VERSION_CODE >= KERNEL_VERSION(6,0,0))
++	return 0;
++#endif
+ }
+ 
+ 

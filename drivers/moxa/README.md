@@ -58,3 +58,9 @@ An unsupported kernel 7 build can be attempted explicitly by adding
 installer's kernel-version guard; checksum/signature verification remains
 enabled, and the vendor source may still require code changes before it will
 compile or load.
+
+The UPort installer applies the included
+`patches/uport-modern-break-ctl.patch` after verifying and extracting Moxa's
+original archive. The patch corrects Moxa's outdated `void` break-control
+callback to the `int` callback required by modern USB-serial kernels. The
+original downloaded archive remains unchanged and SHA-512 verified.

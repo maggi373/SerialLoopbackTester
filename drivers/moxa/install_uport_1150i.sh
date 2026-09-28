@@ -120,6 +120,7 @@ fi
 
 require_command gcc
 require_command make
+require_command patch
 require_command sha512sum
 require_command tar
 require_command tee
@@ -145,6 +146,13 @@ actual_sha512="$(sha512sum "$archive_path" | awk '{print toupper($1)}')"
 tar -xzf "$archive_path" -C "$work_dir"
 source_dir="${work_dir}/mxu11x0"
 [[ -x "${source_dir}/mxinstall" ]] || fail "The verified archive did not contain mxu11x0/mxinstall."
+
+compatibility_patch="${script_dir}/patches/uport-modern-break-ctl.patch"
+[[ -f "$compatibility_patch" ]] || fail "Required compatibility patch was not found at $compatibility_patch."
+echo "Applying the SerialLoopbackTester compatibility patch for modern USB-serial break control..."
+if ! (cd "$source_dir" && patch --batch --forward -p1 < "$compatibility_patch"); then
+  fail "The verified Moxa source did not accept $compatibility_patch."
+fi
 
 echo "Installing Moxa UPort driver for kernel $kernel_release with default mode $mode..."
 install_log="/tmp/serial-loopback-tester-uport-${kernel_release}.log"

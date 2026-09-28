@@ -102,6 +102,7 @@ mkdir -p "$bundle_driver_dir"
 cp "${moxa_driver_dir}/README.md" "${moxa_driver_dir}/install_uport_1150i.sh" \
     "${moxa_driver_dir}/install_nport_real_tty.sh" "$bundle_driver_dir/"
 chmod +x "$bundle_driver_dir/install_uport_1150i.sh" "$bundle_driver_dir/install_nport_real_tty.sh"
+cp -R "${moxa_driver_dir}/patches" "$bundle_driver_dir/patches"
 
 if [[ "${SKIP_MOXA_DRIVERS:-0}" == "1" ]]; then
     echo "Skipping bundled Moxa archives (installers will download and verify them when run)."

@@ -27,6 +27,7 @@ echo "Installing Fedora driver build dependencies for kernel $kernel_release..."
 "${dnf_command[@]}" install -y \
     gcc \
     make \
+    patch \
     setserial \
     tar \
     coreutils \

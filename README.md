@@ -252,6 +252,8 @@ Both driver installers check for root access, Linux 6.x, matching kernel headers
 
 On kernel 7, an unsupported build attempt can be made by adding `--force-unsupported-kernel`. This bypasses only the version guard and does not disable checksum or RPM-signature verification. Moxa's kernel 6.x source may still fail to compile or load; retain the complete compiler output if it does.
 
+The UPort installer also applies the bundled modern-kernel compatibility patch after validating Moxa's untouched source archive. This fixes the vendor source's outdated `void` USB-serial break callback used by every supported UPort model.
+
 ## Usage
 1. Open the **Settings** tab.
 2. Configure RS232 ports and names.

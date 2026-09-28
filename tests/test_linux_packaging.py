@@ -32,6 +32,7 @@ class LinuxPackagingTests(unittest.TestCase):
         self.assertIn("--force-unsupported-kernel", script)
         self.assertIn("--user-agent", script)
         self.assertIn("serial-loopback-tester-uport-${kernel_release}.log", script)
+        self.assertIn("uport-modern-break-ctl.patch", script)
 
     def test_real_tty_installer_maps_four_nport_ports_and_verifies_archive(self):
         script = (REPO_ROOT / "drivers" / "moxa" / "install_nport_real_tty.sh").read_text(encoding="utf-8")
@@ -57,6 +58,7 @@ class LinuxPackagingTests(unittest.TestCase):
         self.assertIn("run_as_root.sh", script)
         self.assertIn("install_serial_access.sh", script)
         self.assertIn("install_fedora_driver_dependencies.sh", script)
+        self.assertIn("patches", script)
 
     def test_fedora_dependency_installer_covers_driver_build_tools(self):
         script = (REPO_ROOT / "install_fedora_driver_dependencies.sh").read_text(encoding="utf-8")
@@ -64,6 +66,7 @@ class LinuxPackagingTests(unittest.TestCase):
         self.assertIn("kernel-devel-uname-r == ${kernel_release}", script)
         self.assertIn("gcc", script)
         self.assertIn("make", script)
+        self.assertIn("patch", script)
         self.assertIn("setserial", script)
         self.assertIn("tar", script)
         self.assertIn("coreutils", script)
@@ -72,6 +75,13 @@ class LinuxPackagingTests(unittest.TestCase):
         self.assertIn("rpmkeys --checksig", script)
         self.assertNotIn('grep -q "signatures OK"', script)
         self.assertNotIn("sudo dnf upgrade --refresh", script)
+
+    def test_uport_compatibility_patch_fixes_modern_break_callback(self):
+        patch = (REPO_ROOT / "drivers" / "moxa" / "patches" / "uport-modern-break-ctl.patch").read_text(encoding="utf-8")
+
+        self.assertIn("static int mxu1_break(struct tty_struct *tty, int break_state)", patch)
+        self.assertIn("return -ENODEV", patch)
+        self.assertIn("return 0", patch)
 
     def test_normal_and_root_start_scripts_are_present(self):
         normal_script = (REPO_ROOT / "start.sh").read_text(encoding="utf-8")
