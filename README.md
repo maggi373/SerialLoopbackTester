@@ -250,6 +250,8 @@ sudo bash ./drivers/moxa/install_uport_1150i.sh --mode rs485-2w --device /dev/tt
 
 Both driver installers check for root access, Linux 6.x, matching kernel headers, GCC, Make, archive integrity, and expected archive contents before running Moxa's installer. Secure Boot may require signing and enrolling these out-of-tree modules according to the Linux distribution's instructions. See `drivers/moxa/README.md` for mode and mapping details.
 
+On kernel 7, an unsupported build attempt can be made by adding `--force-unsupported-kernel`. This bypasses only the version guard and does not disable checksum or RPM-signature verification. Moxa's kernel 6.x source may still fail to compile or load; retain the complete compiler output if it does.
+
 ## Usage
 1. Open the **Settings** tab.
 2. Configure RS232 ports and names.

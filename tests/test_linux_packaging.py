@@ -29,6 +29,9 @@ class LinuxPackagingTests(unittest.TestCase):
         self.assertIn("DEFAULT_UART_MODE=${compile_mode}", script)
         self.assertIn("sha512sum", script)
         self.assertIn("moxa-uport-1100-series-linux-kernel-6.x-driver-v6.0.tgz", script)
+        self.assertIn("--force-unsupported-kernel", script)
+        self.assertIn("--user-agent", script)
+        self.assertIn("serial-loopback-tester-uport-${kernel_release}.log", script)
 
     def test_real_tty_installer_maps_four_nport_ports_and_verifies_archive(self):
         script = (REPO_ROOT / "drivers" / "moxa" / "install_nport_real_tty.sh").read_text(encoding="utf-8")
@@ -37,6 +40,9 @@ class LinuxPackagingTests(unittest.TestCase):
         self.assertIn("mxaddsvr", script)
         self.assertIn("sha512sum", script)
         self.assertIn("moxa-real-tty-linux-kernel-6.x-driver-v6.2.tar", script)
+        self.assertIn("--force-unsupported-kernel", script)
+        self.assertIn("--user-agent", script)
+        self.assertIn("serial-loopback-tester-nport-${kernel_release}.log", script)
 
     def test_linux_build_bundles_moxa_installers_and_socket_handler(self):
         script = (REPO_ROOT / "build_linux.sh").read_text(encoding="utf-8")
@@ -64,6 +70,7 @@ class LinuxPackagingTests(unittest.TestCase):
         self.assertIn("sha512sum", script)
         self.assertIn("kojipkgs.fedoraproject.org", script)
         self.assertIn("rpmkeys --checksig", script)
+        self.assertNotIn('grep -q "signatures OK"', script)
         self.assertNotIn("sudo dnf upgrade --refresh", script)
 
     def test_normal_and_root_start_scripts_are_present(self):

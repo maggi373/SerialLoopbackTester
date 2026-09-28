@@ -12,10 +12,14 @@ Install Moxa's NPort Real TTY Linux 6.x driver and optionally map an NPort 5410.
 Usage:
   sudo ./install_nport_real_tty.sh [--nport-ip ADDRESS]
        [--ports 4] [--data-port PORT --command-port PORT]
+       [--force-unsupported-kernel]
 
 Before mapping, configure every required NPort channel for Real COM mode in
 the NPort web interface. If --nport-ip is omitted, only the driver is installed.
 The Moxa installer is interactive and may ask you to press Enter.
+--force-unsupported-kernel allows a build attempt on Linux kernel 7.x. Moxa
+does not officially support this combination, so compilation or loading can
+still fail. The option does not bypass package or archive verification.
 EOF
 }
 
@@ -32,9 +36,12 @@ download() {
   local url="$1"
   local destination="$2"
   if command -v curl >/dev/null 2>&1; then
-    curl --fail --location --retry 3 --output "$destination" "$url"
+    curl --fail --location --retry 3 \
+      --user-agent "Mozilla/5.0 SerialLoopbackTester" \
+      --output "$destination" "$url"
   elif command -v wget >/dev/null 2>&1; then
-    wget --tries=3 --output-document="$destination" "$url"
+    wget --tries=3 --user-agent="Mozilla/5.0 SerialLoopbackTester" \
+      --output-document="$destination" "$url"
   else
     fail "curl or wget is required because the bundled driver archive was not found."
   fi
@@ -44,6 +51,7 @@ nport_ip=""
 ports=4
 data_port=""
 command_port=""
+force_unsupported_kernel=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --nport-ip)
@@ -65,6 +73,10 @@ while [[ $# -gt 0 ]]; do
       [[ $# -ge 2 ]] || fail "--command-port requires a value."
       command_port="$2"
       shift 2
+      ;;
+    --force-unsupported-kernel)
+      force_unsupported_kernel=1
+      shift
       ;;
     -h|--help)
       usage
@@ -88,13 +100,21 @@ fi
 [[ "$(uname -s)" == "Linux" ]] || fail "This driver installer only runs on Linux."
 kernel_release="$(uname -r)"
 kernel_major="${kernel_release%%.*}"
-[[ "$kernel_major" == "6" ]] || fail "This bundled Moxa driver targets Linux kernel 6.x; running kernel is $kernel_release."
+if [[ "$kernel_major" != "6" ]]; then
+  if [[ "$kernel_major" == "7" && "$force_unsupported_kernel" -eq 1 ]]; then
+    echo "WARNING: Forcing Moxa's Linux 6.x driver to build on unsupported kernel $kernel_release." >&2
+    echo "WARNING: This only bypasses the version guard; it does not guarantee source compatibility." >&2
+  else
+    fail "This bundled Moxa driver targets Linux kernel 6.x; running kernel is $kernel_release. To attempt kernel 7 anyway, add --force-unsupported-kernel."
+  fi
+fi
 [[ -d "/lib/modules/${kernel_release}/build" ]] || fail "Kernel build files for $kernel_release are missing. On Fedora, run ./install_fedora_driver_dependencies.sh from the application directory; it can retrieve superseded kernel-devel packages from Fedora's archive."
 
 require_command gcc
 require_command make
 require_command sha512sum
 require_command tar
+require_command tee
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 work_dir="$(mktemp -d)"
@@ -115,8 +135,10 @@ source_dir="${work_dir}/moxa"
 [[ -x "${source_dir}/mxinst" ]] || fail "The verified archive did not contain moxa/mxinst."
 
 echo "Starting Moxa's interactive Real TTY installer for kernel $kernel_release..."
-if ! (cd "$source_dir" && ./mxinst); then
-  fail "Moxa's installer failed. Review the output above; missing libraries or Secure Boot module signing may need attention."
+install_log="/tmp/serial-loopback-tester-nport-${kernel_release}.log"
+if ! (cd "$source_dir" && ./mxinst) 2>&1 | tee "$install_log"; then
+  chmod 0644 "$install_log"
+  fail "Moxa's installer failed. Full output was saved to $install_log. Missing libraries or Secure Boot module signing may need attention."
 fi
 
 if [[ -n "$nport_ip" ]]; then

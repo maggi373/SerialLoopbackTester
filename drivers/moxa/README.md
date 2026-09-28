@@ -52,3 +52,9 @@ Make, `setserial`, `tar`, and `sha512sum` (provided by `coreutils`). If the
 matching 6.x development package has left Fedora's active repositories, the
 script tries Fedora's signed Koji archive. Do not update to kernel 7 solely to
 obtain build files because the bundled Moxa driver supports kernel 6.x only.
+
+An unsupported kernel 7 build can be attempted explicitly by adding
+`--force-unsupported-kernel` to either driver command. This bypasses only the
+installer's kernel-version guard; checksum/signature verification remains
+enabled, and the vendor source may still require code changes before it will
+compile or load.

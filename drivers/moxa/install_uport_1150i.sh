@@ -11,6 +11,7 @@ Install Moxa's UPort 1100 Linux 6.x driver and select the default interface.
 
 Usage:
   sudo ./install_uport_1150i.sh [--mode MODE] [--device /dev/ttyUSBn]
+       [--force-unsupported-kernel]
 
 Modes:
   rs485-2w   RS-485 two-wire (default)
@@ -21,6 +22,10 @@ Modes:
 --device is optional. When supplied, setserial also applies the selected mode
 to that connected device immediately. Without it, the compiled default applies
 when a supported UPort is attached.
+
+--force-unsupported-kernel allows a build attempt on Linux kernel 7.x. Moxa
+does not officially support this combination, so compilation or loading can
+still fail. The option does not bypass package or archive verification.
 EOF
 }
 
@@ -37,9 +42,12 @@ download() {
   local url="$1"
   local destination="$2"
   if command -v curl >/dev/null 2>&1; then
-    curl --fail --location --retry 3 --output "$destination" "$url"
+    curl --fail --location --retry 3 \
+      --user-agent "Mozilla/5.0 SerialLoopbackTester" \
+      --output "$destination" "$url"
   elif command -v wget >/dev/null 2>&1; then
-    wget --tries=3 --output-document="$destination" "$url"
+    wget --tries=3 --user-agent="Mozilla/5.0 SerialLoopbackTester" \
+      --output-document="$destination" "$url"
   else
     fail "curl or wget is required because the bundled driver archive was not found."
   fi
@@ -47,6 +55,7 @@ download() {
 
 mode="rs485-2w"
 device=""
+force_unsupported_kernel=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --mode)
@@ -58,6 +67,10 @@ while [[ $# -gt 0 ]]; do
       [[ $# -ge 2 ]] || fail "--device requires a /dev path."
       device="$2"
       shift 2
+      ;;
+    --force-unsupported-kernel)
+      force_unsupported_kernel=1
+      shift
       ;;
     -h|--help)
       usage
@@ -95,13 +108,21 @@ esac
 [[ "$(uname -s)" == "Linux" ]] || fail "This driver installer only runs on Linux."
 kernel_release="$(uname -r)"
 kernel_major="${kernel_release%%.*}"
-[[ "$kernel_major" == "6" ]] || fail "This bundled Moxa driver targets Linux kernel 6.x; running kernel is $kernel_release."
+if [[ "$kernel_major" != "6" ]]; then
+  if [[ "$kernel_major" == "7" && "$force_unsupported_kernel" -eq 1 ]]; then
+    echo "WARNING: Forcing Moxa's Linux 6.x driver to build on unsupported kernel $kernel_release." >&2
+    echo "WARNING: This only bypasses the version guard; it does not guarantee source compatibility." >&2
+  else
+    fail "This bundled Moxa driver targets Linux kernel 6.x; running kernel is $kernel_release. To attempt kernel 7 anyway, add --force-unsupported-kernel."
+  fi
+fi
 [[ -d "/lib/modules/${kernel_release}/build" ]] || fail "Kernel build files for $kernel_release are missing. On Fedora, run ./install_fedora_driver_dependencies.sh from the application directory; it can retrieve superseded kernel-devel packages from Fedora's archive."
 
 require_command gcc
 require_command make
 require_command sha512sum
 require_command tar
+require_command tee
 if [[ -n "$device" ]]; then
   [[ "$device" == /dev/* ]] || fail "--device must be an explicit path below /dev."
   require_command setserial
@@ -126,8 +147,17 @@ source_dir="${work_dir}/mxu11x0"
 [[ -x "${source_dir}/mxinstall" ]] || fail "The verified archive did not contain mxu11x0/mxinstall."
 
 echo "Installing Moxa UPort driver for kernel $kernel_release with default mode $mode..."
-if ! (cd "$source_dir" && ./mxinstall install "kflags=-DDEFAULT_UART_MODE=${compile_mode}"); then
-  fail "Moxa's installer failed. Review the compiler output above; Secure Boot may also reject an unsigned module."
+install_log="/tmp/serial-loopback-tester-uport-${kernel_release}.log"
+if ! (cd "$source_dir" && ./mxinstall install "kflags=-DDEFAULT_UART_MODE=${compile_mode}") 2>&1 | tee "$install_log"; then
+  if [[ -f "${source_dir}/build.log" ]]; then
+    {
+      echo ""
+      echo "--- Moxa compiler build.log ---"
+      cat "${source_dir}/build.log"
+    } >> "$install_log"
+  fi
+  chmod 0644 "$install_log"
+  fail "Moxa's installer failed. Full output was saved to $install_log. Secure Boot may also reject an unsigned module."
 fi
 
 if [[ -n "$device" ]]; then

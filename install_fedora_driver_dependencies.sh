@@ -63,8 +63,9 @@ EOF
     fi
 
     command -v rpmkeys >/dev/null 2>&1 || fail "rpmkeys is required to verify the archived Fedora package."
-    rpmkeys --checksig "$archive_rpm" | grep -q "signatures OK" || \
-        fail "Fedora signature verification failed for the archived kernel-devel package."
+    if ! rpmkeys --checksig "$archive_rpm"; then
+        fail "Fedora signature verification failed for the archived kernel-devel package. The package was not installed."
+    fi
     "${dnf_command[@]}" install -y "$archive_rpm" || \
         fail "The archived kernel-devel package was verified but could not be installed."
 fi
