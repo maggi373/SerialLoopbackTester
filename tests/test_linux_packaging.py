@@ -31,7 +31,11 @@ class LinuxPackagingTests(unittest.TestCase):
         self.assertIn("moxa-uport-1100-series-linux-kernel-6.x-driver-v6.0.tgz", script)
         self.assertIn("--force-unsupported-kernel", script)
         self.assertIn("--user-agent", script)
-        self.assertIn("serial-loopback-tester-uport-${kernel_release}.log", script)
+        self.assertIn('log_dir="/var/log/serial-loopback-tester"', script)
+        self.assertIn('install_log="${log_dir}/uport-install.log"', script)
+        self.assertIn('build_log="${log_dir}/uport-build.log"', script)
+        self.assertIn('cp -- "${source_dir}/build.log" "$build_log"', script)
+        self.assertIn("Verified the kernel 6.x break-control callback patch.", script)
         self.assertIn("uport-modern-break-ctl.patch", script)
 
     def test_real_tty_installer_maps_four_nport_ports_and_verifies_archive(self):

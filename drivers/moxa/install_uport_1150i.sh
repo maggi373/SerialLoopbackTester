@@ -26,6 +26,10 @@ when a supported UPort is attached.
 --force-unsupported-kernel allows a build attempt on Linux kernel 7.x. Moxa
 does not officially support this combination, so compilation or loading can
 still fail. The option does not bypass package or archive verification.
+
+Logs are always written to:
+  /var/log/serial-loopback-tester/uport-install.log
+  /var/log/serial-loopback-tester/uport-build.log
 EOF
 }
 
@@ -106,6 +110,20 @@ esac
 
 [[ ${EUID:-$(id -u)} -eq 0 ]] || fail "Run this installer as root (for example, with sudo)."
 [[ "$(uname -s)" == "Linux" ]] || fail "This driver installer only runs on Linux."
+require_command tee
+
+log_dir="/var/log/serial-loopback-tester"
+install_log="${log_dir}/uport-install.log"
+build_log="${log_dir}/uport-build.log"
+mkdir -p "$log_dir" || fail "Could not create the log directory $log_dir."
+: > "$install_log" || fail "Could not create $install_log."
+: > "$build_log" || fail "Could not create $build_log."
+chmod 0644 "$install_log" "$build_log"
+exec > >(tee -a "$install_log") 2>&1
+
+echo "Full installer log: $install_log"
+echo "Moxa compiler log (when produced): $build_log"
+
 kernel_release="$(uname -r)"
 kernel_major="${kernel_release%%.*}"
 if [[ "$kernel_major" != "6" ]]; then
@@ -119,11 +137,11 @@ fi
 [[ -d "/lib/modules/${kernel_release}/build" ]] || fail "Kernel build files for $kernel_release are missing. On Fedora, run ./install_fedora_driver_dependencies.sh from the application directory; it can retrieve superseded kernel-devel packages from Fedora's archive."
 
 require_command gcc
+require_command grep
 require_command make
 require_command patch
 require_command sha512sum
 require_command tar
-require_command tee
 if [[ -n "$device" ]]; then
   [[ "$device" == /dev/* ]] || fail "--device must be an explicit path below /dev."
   require_command setserial
@@ -131,7 +149,23 @@ fi
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 work_dir="$(mktemp -d)"
-trap 'rm -rf -- "$work_dir"' EXIT
+source_dir=""
+cleanup() {
+  local exit_status=$?
+  trap - EXIT
+
+  if [[ -n "$source_dir" && -f "${source_dir}/build.log" ]]; then
+    cp -- "${source_dir}/build.log" "$build_log"
+    chmod 0644 "$build_log"
+    echo "Moxa compiler build.log saved to: $build_log"
+  elif [[ $exit_status -ne 0 ]]; then
+    echo "Moxa did not create build.log; use the full installer log at: $install_log"
+  fi
+
+  rm -rf -- "$work_dir"
+  exit "$exit_status"
+}
+trap cleanup EXIT
 
 archive_path="${script_dir}/${driver_archive}"
 if [[ ! -f "$archive_path" ]]; then
@@ -153,19 +187,20 @@ echo "Applying the SerialLoopbackTester compatibility patch for modern USB-seria
 if ! (cd "$source_dir" && patch --batch --forward -p1 < "$compatibility_patch"); then
   fail "The verified Moxa source did not accept $compatibility_patch."
 fi
+if ! grep -Fq 'static int mxu1_break(struct tty_struct *tty, int break_state)' \
+    "${source_dir}/driver/mxu11x0.c"; then
+  fail "The Moxa break-control compatibility patch did not produce the required kernel 6.x callback."
+fi
+echo "Verified the kernel 6.x break-control callback patch."
 
 echo "Installing Moxa UPort driver for kernel $kernel_release with default mode $mode..."
-install_log="/tmp/serial-loopback-tester-uport-${kernel_release}.log"
-if ! (cd "$source_dir" && ./mxinstall install "kflags=-DDEFAULT_UART_MODE=${compile_mode}") 2>&1 | tee "$install_log"; then
+if ! (cd "$source_dir" && ./mxinstall install "kflags=-DDEFAULT_UART_MODE=${compile_mode}"); then
   if [[ -f "${source_dir}/build.log" ]]; then
-    {
-      echo ""
-      echo "--- Moxa compiler build.log ---"
-      cat "${source_dir}/build.log"
-    } >> "$install_log"
+    echo ""
+    echo "--- Moxa compiler build.log ---"
+    cat "${source_dir}/build.log"
   fi
-  chmod 0644 "$install_log"
-  fail "Moxa's installer failed. Full output was saved to $install_log. Secure Boot may also reject an unsigned module."
+  fail "Moxa's installer failed. Full output: $install_log. Compiler output: $build_log. Secure Boot may also reject an unsigned module."
 fi
 
 if [[ -n "$device" ]]; then

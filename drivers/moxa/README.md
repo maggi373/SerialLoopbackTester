@@ -16,6 +16,12 @@ with RS-485 two-wire as the compiled default:
 sudo ./install_uport_1150i.sh --mode rs485-2w
 ```
 
+The installer always writes its complete output to
+`/var/log/serial-loopback-tester/uport-install.log`. If Moxa creates its own
+compiler `build.log`, that file is preserved at
+`/var/log/serial-loopback-tester/uport-build.log` before the temporary build
+directory is removed. Both files are readable without `sudo` after the run.
+
 To apply the setting immediately to a connected device as well, install your
 distribution's `setserial` package and add, for example,
 `--device /dev/ttyUSB0`. Other accepted modes are `rs485-4w`, `rs422`, and
