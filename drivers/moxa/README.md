@@ -39,3 +39,13 @@ It lets Moxa's `mxaddsvr` choose its standard Real COM ports unless both
 Both installers require root access, a Linux 6.x kernel, matching kernel
 headers, GCC, and Make. Secure Boot systems may require signing/enrolling the
 out-of-tree kernel module according to the distribution's procedure.
+
+On Fedora, install all driver build dependencies from the application or
+repository root before running either driver installer:
+
+```sh
+./install_fedora_driver_dependencies.sh
+```
+
+This installs the exact `kernel-devel` package for the running kernel, GCC,
+Make, `setserial`, `tar`, and `sha512sum` (provided by `coreutils`).

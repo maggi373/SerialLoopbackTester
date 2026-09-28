@@ -89,11 +89,13 @@ fi
 cp README.md "${repo_dir}/dist/${portable_name}/README.md"
 cp "${repo_dir}/start.sh" "${repo_dir}/start_as_root.sh" \
     "${repo_dir}/run_as_root.sh" "${repo_dir}/install_serial_access.sh" \
+    "${repo_dir}/install_fedora_driver_dependencies.sh" \
     "${repo_dir}/dist/${portable_name}/"
 chmod +x "${repo_dir}/dist/${portable_name}/start.sh" \
     "${repo_dir}/dist/${portable_name}/start_as_root.sh" \
     "${repo_dir}/dist/${portable_name}/run_as_root.sh" \
-    "${repo_dir}/dist/${portable_name}/install_serial_access.sh"
+    "${repo_dir}/dist/${portable_name}/install_serial_access.sh" \
+    "${repo_dir}/dist/${portable_name}/install_fedora_driver_dependencies.sh"
 
 bundle_driver_dir="${repo_dir}/dist/${portable_name}/drivers/moxa"
 mkdir -p "$bundle_driver_dir"

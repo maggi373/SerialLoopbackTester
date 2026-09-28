@@ -50,6 +50,18 @@ class LinuxPackagingTests(unittest.TestCase):
         self.assertIn("start_as_root.sh", script)
         self.assertIn("run_as_root.sh", script)
         self.assertIn("install_serial_access.sh", script)
+        self.assertIn("install_fedora_driver_dependencies.sh", script)
+
+    def test_fedora_dependency_installer_covers_driver_build_tools(self):
+        script = (REPO_ROOT / "install_fedora_driver_dependencies.sh").read_text(encoding="utf-8")
+
+        self.assertIn("kernel-devel-uname-r == ${kernel_release}", script)
+        self.assertIn("gcc", script)
+        self.assertIn("make", script)
+        self.assertIn("setserial", script)
+        self.assertIn("tar", script)
+        self.assertIn("coreutils", script)
+        self.assertIn("sha512sum", script)
 
     def test_normal_and_root_start_scripts_are_present(self):
         normal_script = (REPO_ROOT / "start.sh").read_text(encoding="utf-8")

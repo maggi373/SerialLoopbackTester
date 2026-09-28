@@ -141,9 +141,11 @@ Run the application with `bash ./run_production.sh --root` or the packaged `./st
 To compile the bundled Moxa kernel modules on Fedora, install the compiler and development files matching the currently running kernel:
 
 ```bash
-sudo dnf install gcc make kernel-devel-$(uname -r) elfutils-libelf-devel openssl-devel setserial
-test -e /lib/modules/$(uname -r)/build
+chmod +x ./install_fedora_driver_dependencies.sh
+./install_fedora_driver_dependencies.sh
 ```
+
+The script installs GCC, Make, `setserial`, `tar`, `sha512sum` (from Fedora's `coreutils` package), the exact `kernel-devel` package for the running kernel, and the other libraries required by the Moxa build. It invokes `sudo` itself when necessary. If Fedora no longer has development files matching the running kernel, update Fedora, reboot into the new kernel, and run the script again.
 
 Then run the appropriate installer from the extracted application folder:
 
