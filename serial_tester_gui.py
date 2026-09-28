@@ -16,6 +16,11 @@ import tkinter as tk
 from tkinter import messagebox, scrolledtext, ttk
 
 from paro_simulator import ParoSimulator
+from moxa_uport_mode import (
+    MODE_LABELS as MOXA_MODE_LABELS,
+    apply_moxa_uport_mode,
+    normalize_mode as normalize_moxa_mode,
+)
 
 try:
     import serial
@@ -252,6 +257,21 @@ def linux_setserial_mode_label(value: object) -> str:
     return LINUX_SETSERIAL_MODE_LABELS[normalize_linux_setserial_mode(value)]
 
 
+def normalize_linux_moxa_modes(value: object) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    modes: dict[str, str] = {}
+    for raw_device, raw_mode in value.items():
+        device = normalize_port_text(raw_device)
+        if not device.startswith("/dev/") or "://" in device:
+            continue
+        try:
+            modes[device] = normalize_moxa_mode(raw_mode)
+        except ValueError:
+            continue
+    return modes
+
+
 def apply_linux_setserial_mode(port_name: object, mode: object) -> None:
     normalized_mode = normalize_linux_setserial_mode(mode)
     if normalized_mode == LINUX_SETSERIAL_MODE_NONE or not sys.platform.startswith("linux"):
@@ -287,6 +307,7 @@ def open_serial_endpoint(
     stopbits: float,
     timeout: float,
     write_timeout: float,
+    linux_moxa_mode: str | None = None,
 ):
     """Open a local serial device or a raw TCP serial endpoint."""
     endpoint = normalize_port_text(port_name)
@@ -309,7 +330,31 @@ def open_serial_endpoint(
             )
         return serial.serial_for_url(f"socket://{remainder}", **serial_options)
 
-    return serial.Serial(port=endpoint, **serial_options)
+    opened = serial.Serial(port=endpoint, **serial_options)
+    if sys.platform.startswith("linux") and linux_moxa_mode:
+        try:
+            apply_moxa_uport_mode(
+                endpoint,
+                linux_moxa_mode,
+                baudrate=baudrate,
+                bytesize=bytesize,
+                parity=parity,
+                stopbits=stopbits,
+                xonxoff=bool(getattr(opened, "xonxoff", False)),
+                rtscts=bool(getattr(opened, "rtscts", False)),
+            )
+            # SET_CONFIG asserts both modem-control lines. Ask pyserial to
+            # restore the states selected for this open port.
+            for signal_name in ("dtr", "rts"):
+                if hasattr(opened, signal_name):
+                    signal_state = bool(getattr(opened, signal_name))
+                    setattr(opened, signal_name, signal_state)
+        except Exception:
+            close = getattr(opened, "close", None)
+            if callable(close):
+                close()
+            raise
+    return opened
 
 
 def normalize_port_list(values: object) -> list[str]:
@@ -531,6 +576,7 @@ def default_ui_settings() -> dict:
         "global_packet_size_bytes": DEFAULT_PACKET_SIZE_BYTES,
         "rs232_count": DEFAULT_RS232_COUNT,
         "rs485_pair_count": DEFAULT_RS485_PAIR_COUNT,
+        "linux_moxa_modes": {},
         "presets": [default_preset_item(i) for i in range(DEFAULT_PRESET_COUNT)],
     }
 
@@ -656,6 +702,9 @@ def normalize_ui_settings(item: object) -> dict:
             base["rs485_pair_count"],
             0,
             MAX_RS485_PAIR_COUNT,
+        ),
+        "linux_moxa_modes": normalize_linux_moxa_modes(
+            source.get("linux_moxa_modes", base["linux_moxa_modes"])
         ),
         "presets": presets,
     }
@@ -924,6 +973,7 @@ class RS232Worker(threading.Thread):
             stopbits=float(self.config["stopbits"]),
             timeout=read_timeout,
             write_timeout=float(self.config["timeout_s"]),
+            linux_moxa_mode=self.config.get("linux_moxa_mode"),
         )
 
     def run_paro_simulator(self, port: serial.Serial) -> None:
@@ -1117,6 +1167,7 @@ class RS485PairWorker(threading.Thread):
             stopbits=float(self.config["stopbits"]),
             timeout=float(self.config["timeout_s"]),
             write_timeout=float(self.config["timeout_s"]),
+            linux_moxa_mode=self.config.get("linux_moxa_mode"),
         )
 
     def run(self) -> None:
@@ -1243,6 +1294,7 @@ class SerialTesterApp(tk.Tk):
         self.rs485_configs = self.settings["rs485_pairs"]
         self.ui_settings = self.settings["ui"]
         self.preset_configs = self.ui_settings["presets"]
+        self.linux_moxa_modes = self.ui_settings["linux_moxa_modes"]
 
         self.rs232_state = [self.new_state() for _ in self.rs232_configs]
         self.rs485_state = [self.new_state() for _ in self.rs485_configs]
@@ -1450,7 +1502,7 @@ class SerialTesterApp(tk.Tk):
         self.notebook.add(rs485_tab, text="RS485 Monitor")
         self.notebook.add(settings_tab, text="Settings")
         if linux_setserial_tab is not None:
-            self.notebook.add(linux_setserial_tab, text="Linux setserial")
+            self.notebook.add(linux_setserial_tab, text="Linux Serial Mode")
         self.notebook.add(log_tab, text="Log")
         self.notebook.bind("<<NotebookTabChanged>>", self._on_notebook_tab_changed)
 
@@ -3161,8 +3213,9 @@ class SerialTesterApp(tk.Tk):
         ttk.Label(
             panel,
             text=(
-                "This panel runs setserial only when Apply is clicked. It never changes a mode while tests start, "
-                "ports open, or devices reconnect."
+                "For a Moxa UPort 1150/1150I, the built-in-driver helper avoids Moxa's kernel module. "
+                "Clicking its Apply button remembers the selected mode for this device and reapplies it immediately "
+                "after this application opens the port. Use the setserial button only with Moxa's legacy driver."
             ),
             wraplength=900,
             justify=tk.LEFT,
@@ -3190,7 +3243,7 @@ class SerialTesterApp(tk.Tk):
             state="readonly",
         ).grid(row=2, column=1, sticky="ew", pady=4)
 
-        ttk.Label(panel, text="Command").grid(row=3, column=0, sticky="nw", pady=4, padx=(0, 12))
+        ttk.Label(panel, text="Commands").grid(row=3, column=0, sticky="nw", pady=4, padx=(0, 12))
         ttk.Label(
             panel,
             textvariable=self.linux_setserial_command_var,
@@ -3201,9 +3254,19 @@ class SerialTesterApp(tk.Tk):
 
         actions = ttk.Frame(panel)
         actions.grid(row=4, column=0, columnspan=2, sticky="w", pady=(12, 8))
+        ttk.Button(
+            actions,
+            text="Apply with built-in Moxa helper",
+            command=self.apply_linux_moxa_from_panel,
+        ).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(actions, text="Apply with setserial", command=self.apply_linux_setserial_from_panel).pack(
             side=tk.LEFT, padx=(0, 8)
         )
+        ttk.Button(
+            actions,
+            text="Forget Moxa helper mode",
+            command=self.forget_linux_moxa_from_panel,
+        ).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(
             actions,
             text="Refresh Devices",
@@ -3221,8 +3284,8 @@ class SerialTesterApp(tk.Tk):
             parent,
             text=(
                 "Mode values: port 0 = RS-232, port 1 = RS-485 2-wire, port 2 = RS-422, "
-                "port 3 = RS-485 4-wire. The Moxa driver and setserial package must be installed, "
-                "and changing the mode normally requires root privileges."
+                "port 3 = RS-485 4-wire. The built-in helper supports USB IDs 110a:1150 and 110a:1151. "
+                "Run install_serial_access.sh once for non-root USB access."
             ),
             wraplength=950,
             justify=tk.LEFT,
@@ -3236,7 +3299,147 @@ class SerialTesterApp(tk.Tk):
         device = normalize_port_text(self.linux_setserial_device_var.get()) or "/dev/ttyUSB0"
         mode = normalize_linux_setserial_mode(self.linux_setserial_mode_var.get())
         mode_code = LINUX_SETSERIAL_MODE_CODES.get(mode, 0)
-        self.linux_setserial_command_var.set(f"setserial {device} port {mode_code}")
+        remembered = self.linux_moxa_modes.get(device)
+        remembered_text = f"  [remembered: {remembered}]" if remembered else ""
+        settings, _active_port = self._moxa_serial_settings_for_device(device)
+        helper_command = (
+            f"./set_moxa_uport_mode.sh {device} {mode} "
+            f"--baudrate {settings['baudrate']} --bytesize {settings['bytesize']} "
+            f"--parity {settings['parity']} --stopbits {settings['stopbits']:g}"
+        )
+        if settings["xonxoff"]:
+            helper_command += " --xonxoff"
+        if settings["rtscts"]:
+            helper_command += " --rtscts"
+        self.linux_setserial_command_var.set(
+            f"{helper_command}\n"
+            f"setserial {device} port {mode_code}{remembered_text}"
+        )
+
+    def _active_serial_for_device(self, device: str):
+        for worker in self.rs232_workers.values():
+            if normalize_port_text(worker.config.get("port")) != device:
+                continue
+            with worker.port_lock:
+                if worker.active_port is not None:
+                    return worker.active_port
+        for worker in self.rs485_workers.values():
+            if normalize_port_text(worker.config.get("sender_port")) != device:
+                continue
+            with worker.port_lock:
+                if worker.active_ports:
+                    return worker.active_ports[0]
+        return None
+
+    def _moxa_serial_settings_for_device(self, device: str) -> tuple[dict, object | None]:
+        active_port = self._active_serial_for_device(device)
+        if active_port is not None:
+            return {
+                "baudrate": int(active_port.baudrate),
+                "bytesize": int(active_port.bytesize),
+                "parity": str(active_port.parity).upper(),
+                "stopbits": float(active_port.stopbits),
+                "xonxoff": bool(getattr(active_port, "xonxoff", False)),
+                "rtscts": bool(getattr(active_port, "rtscts", False)),
+            }, active_port
+
+        for cfg, key in (
+            *((item, "port") for item in self.rs232_configs),
+            *((item, "sender_port") for item in self.rs485_configs),
+        ):
+            if normalize_port_text(cfg.get(key)) == device:
+                return {
+                    "baudrate": int(cfg["baudrate"]),
+                    "bytesize": int(cfg["bytesize"]),
+                    "parity": str(cfg["parity"]).upper(),
+                    "stopbits": float(cfg["stopbits"]),
+                    "xonxoff": False,
+                    "rtscts": False,
+                }, None
+
+        return {
+            "baudrate": max(as_int(self.global_baudrate_var.get(), DEFAULT_BAUDRATE), 1),
+            "bytesize": 8,
+            "parity": "N",
+            "stopbits": 1.0,
+            "xonxoff": False,
+            "rtscts": False,
+        }, None
+
+    def apply_linux_moxa_from_panel(self) -> None:
+        device = normalize_port_text(self.linux_setserial_device_var.get())
+        mode = normalize_linux_setserial_mode(self.linux_setserial_mode_var.get())
+        if not device:
+            messagebox.showerror("Select device", "Select or enter a local /dev/... serial device.")
+            return
+        if mode not in LINUX_SETSERIAL_MODE_CODES:
+            messagebox.showerror("Select mode", "Select one of the four interface modes.")
+            return
+
+        settings, active_port = self._moxa_serial_settings_for_device(device)
+        try:
+            moxa_device = apply_moxa_uport_mode(device, mode, **settings)
+            if active_port is not None:
+                for signal_name in ("dtr", "rts"):
+                    if hasattr(active_port, signal_name):
+                        signal_state = bool(getattr(active_port, signal_name))
+                        setattr(active_port, signal_name, signal_state)
+        except (OSError, ValueError) as exc:
+            detail = serial_error_detail(exc)
+            self.linux_setserial_status_var.set(f"FAILED: {detail}")
+            messagebox.showerror("Moxa helper failed", detail)
+            self.append_log(f"Moxa helper failed for {device}: {detail}")
+            return
+
+        self.linux_moxa_modes[device] = normalize_moxa_mode(mode)
+        for worker in (*self.rs232_workers.values(), *self.rs485_workers.values()):
+            worker_device = normalize_port_text(
+                worker.config.get("port", worker.config.get("sender_port", ""))
+            )
+            if worker_device == device:
+                worker.config["linux_moxa_mode"] = self.linux_moxa_modes[device]
+        self.ui_settings["linux_moxa_modes"] = self.linux_moxa_modes
+        settings_saved = self.save_settings(show_message=False)
+        self._update_linux_setserial_command_preview()
+
+        mode_label = MOXA_MODE_LABELS[self.linux_moxa_modes[device]]
+        if settings_saved:
+            result = (
+                f"Applied and remembered {mode_label} for {moxa_device.product_name} on {device}; "
+                "it will be reapplied after each application open."
+            )
+        else:
+            result = (
+                f"Applied {mode_label} for {moxa_device.product_name} on {device} for this run, "
+                "but the remembered mode could not be saved."
+            )
+        self.linux_setserial_status_var.set(result)
+        self.append_log(result)
+        messagebox.showinfo("Moxa mode applied", result)
+
+    def forget_linux_moxa_from_panel(self) -> None:
+        device = normalize_port_text(self.linux_setserial_device_var.get())
+        if not device:
+            messagebox.showerror("Select device", "Select or enter a local /dev/... serial device.")
+            return
+        removed = self.linux_moxa_modes.pop(device, None)
+        for worker in (*self.rs232_workers.values(), *self.rs485_workers.values()):
+            worker_device = normalize_port_text(
+                worker.config.get("port", worker.config.get("sender_port", ""))
+            )
+            if worker_device == device:
+                worker.config["linux_moxa_mode"] = ""
+        self.ui_settings["linux_moxa_modes"] = self.linux_moxa_modes
+        settings_saved = self.save_settings(show_message=False)
+        self._update_linux_setserial_command_preview()
+        if removed:
+            result = f"Forgot the automatic Moxa helper mode for {device}. Current hardware mode was not changed."
+            if not settings_saved:
+                result += " The settings file could not be updated."
+        else:
+            result = f"No Moxa helper mode was remembered for {device}."
+        self.linux_setserial_status_var.set(result)
+        self.append_log(result)
 
     def apply_linux_setserial_from_panel(self) -> None:
         device = normalize_port_text(self.linux_setserial_device_var.get())
@@ -3768,6 +3971,9 @@ class SerialTesterApp(tk.Tk):
                 state["last"] = "Waiting for worker"
                 worker_cfg = cfg.copy()
                 worker_cfg["startup_delay_s"] = delay
+                worker_cfg["linux_moxa_mode"] = self.linux_moxa_modes.get(
+                    normalize_port_text(cfg.get("port")), ""
+                )
                 worker_id = self.next_worker_id
                 self.next_worker_id += 1
                 worker = RS232Worker(idx, worker_cfg, self.event_queue, worker_id=worker_id)
@@ -3801,6 +4007,9 @@ class SerialTesterApp(tk.Tk):
                 state["last"] = "Waiting for worker"
                 worker_cfg = cfg.copy()
                 worker_cfg["startup_delay_s"] = delay
+                worker_cfg["linux_moxa_mode"] = self.linux_moxa_modes.get(
+                    normalize_port_text(cfg.get("sender_port")), ""
+                )
                 worker_id = self.next_worker_id
                 self.next_worker_id += 1
                 worker = RS485PairWorker(idx, worker_cfg, self.event_queue, worker_id=worker_id)
@@ -4141,6 +4350,7 @@ class SerialTesterApp(tk.Tk):
         self.rs485_configs = self.settings["rs485_pairs"]
         self.ui_settings = self.settings["ui"]
         self.preset_configs = self.ui_settings["presets"]
+        self.linux_moxa_modes = self.ui_settings["linux_moxa_modes"]
         self.start_fullscreen_var.set(bool(self.ui_settings.get("start_fullscreen", False)))
         self.auto_start_launch_var.set(bool(self.ui_settings.get("auto_start_after_launch_2s", True)))
         self.delay_comm_start_var.set(bool(self.ui_settings.get("delay_comm_start_2s", True)))

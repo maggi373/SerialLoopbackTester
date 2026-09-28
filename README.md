@@ -32,6 +32,7 @@ Python GUI tool for:
 - Optional startup setting: launch in fullscreen by default
 - Optional startup setting (default ON): delay communications by 2 seconds
 - On Linux, the RS232 and RS485 settings editors have independent vertical scrolling so every field and Apply button remains accessible at larger desktop scaling
+- Moxa UPort 1150/1150I interface switching through the in-kernel Linux driver, with no out-of-tree module or kernel headers required
 
 ![solder.py](https://files.thorfusion.com/images/serial.jpg)
 
@@ -129,14 +130,24 @@ getent group dialout
 
 The `usermod` command above adds the currently logged-in Fedora user to `dialout`; do not replace `$USER` with `root`. Log out of the desktop completely and back in, then verify with `id -nG` before starting the application. Using `/dev/serial/by-id/...` in the application is recommended because `/dev/ttyUSBn` numbers can change after reconnecting devices.
 
-The Linux build also provides a **Linux setserial** tab. Select or type a local `/dev/...` device, select an interface mode, review the displayed command, and click **Apply with setserial**. Commands are only executed by that button; starting tests and reconnecting ports never changes the electrical interface automatically. The mode mapping is:
+The Linux build provides a **Linux Serial Mode** tab. For a Moxa UPort 1150/1150I, select the local `/dev/...` device and interface mode, then click **Apply with built-in Moxa helper**. This uses Linux's in-kernel `ti_usb_3410_5052` driver and a userspace USB control request, so Moxa's out-of-tree kernel module, kernel headers, and `setserial` are not required. A mode applied this way is saved for that device path and reapplied immediately after this application opens it because the stock driver resets the adapter to RS-232 during open/configuration.
+
+The legacy **Apply with setserial** button remains available for systems already using Moxa's driver. The mode mapping is:
 
 - `port 0`: RS-232
 - `port 1`: RS-485 two-wire
 - `port 2`: RS-422
 - `port 3`: RS-485 four-wire
 
-Run the application with `bash ./run_production.sh --root` or the packaged `./start_as_root.sh` when the driver requires root permission for this operation.
+Run `./install_serial_access.sh` once, reconnect the adapter, and log out/in to let a normal `dialout` user access both the TTY and the Moxa USB control endpoint. Root remains available through `bash ./run_production.sh --root` or the packaged `./start_as_root.sh` for immediate testing.
+
+For manual verification outside the GUI, apply the same userspace command after the TTY has been opened/configured:
+
+```bash
+./set_moxa_uport_mode.sh /dev/ttyUSB0 rs485-2w --baudrate 19200 --bytesize 8 --parity N --stopbits 1
+```
+
+Supported modes are `rs232`, `rs485-2w`, `rs422`, and `rs485-4w`. Opening the TTY or changing its baud/parity afterward makes the stock kernel driver send its RS-232 configuration again, so rerun the script after that operation. The GUI handles this reapplication for modes explicitly remembered from its Linux Serial Mode panel.
 
 To compile the bundled Moxa kernel modules on Fedora, install the compiler and development files matching the currently running kernel:
 
@@ -236,7 +247,15 @@ Direct TCP is the simpler option and needs no kernel module. The Real TTY option
 
 ### UPort 1150I RS-485
 
-Linux can identify this USB adapter with an in-kernel driver, but selecting the 1150I electrical interface requires Moxa's driver for this use. The bundled wrapper compiles Moxa's Linux 6.x driver with RS-485 two-wire as the default:
+Linux's in-kernel `ti_usb_3410_5052` driver recognizes the UPort 1150 and isolated 1150I. Use the application's **Linux Serial Mode** panel or the included userspace helper to select RS-485 without compiling a kernel module:
+
+```bash
+./install_serial_access.sh
+# Reconnect/log in again, open the port in the application, then for manual verification:
+./set_moxa_uport_mode.sh /dev/ttyUSB0 rs485-2w --baudrate 19200
+```
+
+The older Moxa-module route is retained only as a compatibility fallback. Its bundled wrapper compiles Moxa's Linux 6.x driver with RS-485 two-wire as the default:
 
 ```bash
 sudo bash ./drivers/moxa/install_uport_1150i.sh --mode rs485-2w

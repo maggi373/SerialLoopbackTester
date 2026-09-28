@@ -9,8 +9,18 @@ running any vendor code.
 ## UPort 1150I in RS-485 mode
 
 The in-kernel `ti_usb_3410_5052` driver recognizes the UPort, but it does not
-provide the interface-mode control needed here. Install Moxa's Linux 6.x driver
-with RS-485 two-wire as the compiled default:
+provide its own interface-mode control for the 1150/1150I. The preferred route
+is the userspace helper in the application root, which needs no kernel headers:
+
+```sh
+./set_moxa_uport_mode.sh /dev/ttyUSB0 rs485-2w --baudrate 19200
+```
+
+Apply it after the TTY is opened/configured. The application's Linux Serial
+Mode panel remembers explicitly selected modes and handles this ordering.
+
+Moxa's Linux 6.x driver remains available as a compatibility fallback. To use
+it with RS-485 two-wire as the compiled default:
 
 ```sh
 sudo ./install_uport_1150i.sh --mode rs485-2w

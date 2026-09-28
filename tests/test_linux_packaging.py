@@ -62,6 +62,8 @@ class LinuxPackagingTests(unittest.TestCase):
         self.assertIn("run_as_root.sh", script)
         self.assertIn("install_serial_access.sh", script)
         self.assertIn("install_fedora_driver_dependencies.sh", script)
+        self.assertIn("set_moxa_uport_mode.sh", script)
+        self.assertIn("moxa_uport_mode.py", script)
         self.assertIn("patches", script)
 
     def test_fedora_dependency_installer_covers_driver_build_tools(self):
@@ -120,7 +122,16 @@ class LinuxPackagingTests(unittest.TestCase):
         self.assertIn('KERNEL=="ttyUSB[0-9]*"', script)
         self.assertIn('KERNEL=="ttyACM[0-9]*"', script)
         self.assertIn('KERNEL=="ttyr[0-9a-fA-F]*"', script)
+        self.assertIn('ATTR{idVendor}=="110a"', script)
+        self.assertIn('ATTR{idProduct}=="1150"', script)
+        self.assertIn('ATTR{idProduct}=="1151"', script)
         self.assertIn("usermod -aG dialout", script)
+
+    def test_manual_moxa_mode_script_is_packaged_and_uses_userspace_helper(self):
+        script = (REPO_ROOT / "set_moxa_uport_mode.sh").read_text(encoding="utf-8")
+
+        self.assertIn("moxa_uport_mode.py", script)
+        self.assertIn('exec "$python_bin"', script)
 
 
 if __name__ == "__main__":

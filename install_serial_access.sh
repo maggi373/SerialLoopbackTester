@@ -21,6 +21,8 @@ printf '%s\n' \
     'SUBSYSTEM=="tty", KERNEL=="ttyUSB[0-9]*", GROUP="dialout", MODE="0660", TAG+="uaccess"' \
     'SUBSYSTEM=="tty", KERNEL=="ttyACM[0-9]*", GROUP="dialout", MODE="0660", TAG+="uaccess"' \
     'SUBSYSTEM=="tty", KERNEL=="ttyr[0-9a-fA-F]*", GROUP="dialout", MODE="0660", TAG+="uaccess"' \
+    'SUBSYSTEM=="usb", ATTR{idVendor}=="110a", ATTR{idProduct}=="1150", GROUP="dialout", MODE="0660", TAG+="uaccess"' \
+    'SUBSYSTEM=="usb", ATTR{idVendor}=="110a", ATTR{idProduct}=="1151", GROUP="dialout", MODE="0660", TAG+="uaccess"' \
     > "$rules_path"
 chmod 0644 "$rules_path"
 
@@ -31,6 +33,7 @@ fi
 
 udevadm control --reload-rules
 udevadm trigger --subsystem-match=tty
+udevadm trigger --subsystem-match=usb --attr-match=idVendor=110a
 
 echo "Installed serial access rules at $rules_path."
 echo "Unplug/replug USB serial adapters, then log out and back in."

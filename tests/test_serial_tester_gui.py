@@ -242,6 +242,87 @@ class SerialTesterTests(unittest.TestCase):
         apply_mode.assert_not_called()
 
     @patch.object(app_module.sys, "platform", "linux")
+    def test_remembered_moxa_mode_is_applied_after_serial_port_opens(self):
+        opened = types.SimpleNamespace(
+            xonxoff=False,
+            rtscts=False,
+            dtr=True,
+            rts=True,
+            close=lambda: None,
+        )
+        with (
+            patch.object(app_module.serial, "Serial", return_value=opened),
+            patch.object(app_module, "apply_moxa_uport_mode") as apply_mode,
+        ):
+            result = app_module.open_serial_endpoint(
+                "/dev/ttyUSB0",
+                baudrate=19200,
+                bytesize=8,
+                parity="N",
+                stopbits=1.0,
+                timeout=1.0,
+                write_timeout=1.0,
+                linux_moxa_mode="rs485-2w",
+            )
+
+        self.assertIs(result, opened)
+        apply_mode.assert_called_once_with(
+            "/dev/ttyUSB0",
+            "rs485-2w",
+            baudrate=19200,
+            bytesize=8,
+            parity="N",
+            stopbits=1.0,
+            xonxoff=False,
+            rtscts=False,
+        )
+
+    @patch.object(app_module.sys, "platform", "linux")
+    def test_failed_moxa_mode_application_closes_opened_serial_port(self):
+        closed = []
+        opened = types.SimpleNamespace(
+            xonxoff=False,
+            rtscts=False,
+            close=lambda: closed.append(True),
+        )
+        with (
+            patch.object(app_module.serial, "Serial", return_value=opened),
+            patch.object(app_module, "apply_moxa_uport_mode", side_effect=PermissionError("USB denied")),
+        ):
+            with self.assertRaisesRegex(PermissionError, "USB denied"):
+                app_module.open_serial_endpoint(
+                    "/dev/ttyUSB0",
+                    baudrate=19200,
+                    bytesize=8,
+                    parity="N",
+                    stopbits=1.0,
+                    timeout=1.0,
+                    write_timeout=1.0,
+                    linux_moxa_mode="rs485-2w",
+                )
+
+        self.assertEqual(closed, [True])
+
+    def test_moxa_mode_assignments_are_normalized_and_persisted(self):
+        ui = app_module.normalize_ui_settings(
+            {
+                "linux_moxa_modes": {
+                    "/dev/ttyUSB0": "RS-485",
+                    "/dev/serial/by-id/Moxa": "3",
+                    "COM4": "rs485-2w",
+                }
+            }
+        )
+
+        self.assertEqual(
+            ui["linux_moxa_modes"],
+            {
+                "/dev/ttyUSB0": "rs485-2w",
+                "/dev/serial/by-id/Moxa": "rs485-4w",
+            },
+        )
+
+    @patch.object(app_module.sys, "platform", "linux")
     def test_setserial_mode_mapping_and_explicit_command(self):
         expected = {
             "rs232": 0,
