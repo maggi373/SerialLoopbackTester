@@ -89,7 +89,7 @@ fi
 kernel_release="$(uname -r)"
 kernel_major="${kernel_release%%.*}"
 [[ "$kernel_major" == "6" ]] || fail "This bundled Moxa driver targets Linux kernel 6.x; running kernel is $kernel_release."
-[[ -d "/lib/modules/${kernel_release}/build" ]] || fail "Kernel headers for $kernel_release are missing. Install the matching headers package first."
+[[ -d "/lib/modules/${kernel_release}/build" ]] || fail "Kernel build files for $kernel_release are missing. On Fedora, run ./install_fedora_driver_dependencies.sh from the application directory; it can retrieve superseded kernel-devel packages from Fedora's archive."
 
 require_command gcc
 require_command make

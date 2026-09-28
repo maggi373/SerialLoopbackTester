@@ -62,6 +62,9 @@ class LinuxPackagingTests(unittest.TestCase):
         self.assertIn("tar", script)
         self.assertIn("coreutils", script)
         self.assertIn("sha512sum", script)
+        self.assertIn("kojipkgs.fedoraproject.org", script)
+        self.assertIn("rpmkeys --checksig", script)
+        self.assertNotIn("sudo dnf upgrade --refresh", script)
 
     def test_normal_and_root_start_scripts_are_present(self):
         normal_script = (REPO_ROOT / "start.sh").read_text(encoding="utf-8")

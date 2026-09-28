@@ -145,7 +145,7 @@ chmod +x ./install_fedora_driver_dependencies.sh
 ./install_fedora_driver_dependencies.sh
 ```
 
-The script installs GCC, Make, `setserial`, `tar`, `sha512sum` (from Fedora's `coreutils` package), the exact `kernel-devel` package for the running kernel, and the other libraries required by the Moxa build. It invokes `sudo` itself when necessary. If Fedora no longer has development files matching the running kernel, update Fedora, reboot into the new kernel, and run the script again.
+The script installs GCC, Make, `setserial`, `tar`, `sha512sum` (from Fedora's `coreutils` package), the exact `kernel-devel` package for the running kernel, and the other libraries required by the Moxa build. It invokes `sudo` itself when necessary. If Fedora's active repositories no longer contain development files matching an installed 6.x kernel, the script retrieves that exact signed `kernel-devel` RPM from Fedora's official Koji archive instead of upgrading the machine to an unsupported kernel major version.
 
 Then run the appropriate installer from the extracted application folder:
 

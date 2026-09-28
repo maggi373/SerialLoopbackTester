@@ -48,4 +48,7 @@ repository root before running either driver installer:
 ```
 
 This installs the exact `kernel-devel` package for the running kernel, GCC,
-Make, `setserial`, `tar`, and `sha512sum` (provided by `coreutils`).
+Make, `setserial`, `tar`, and `sha512sum` (provided by `coreutils`). If the
+matching 6.x development package has left Fedora's active repositories, the
+script tries Fedora's signed Koji archive. Do not update to kernel 7 solely to
+obtain build files because the bundled Moxa driver supports kernel 6.x only.

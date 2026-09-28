@@ -24,7 +24,7 @@ else
 fi
 
 echo "Installing Fedora driver build dependencies for kernel $kernel_release..."
-if ! "${dnf_command[@]}" install -y \
+"${dnf_command[@]}" install -y \
     gcc \
     make \
     setserial \
@@ -32,16 +32,41 @@ if ! "${dnf_command[@]}" install -y \
     coreutils \
     curl \
     elfutils-libelf-devel \
-    openssl-devel \
-    "kernel-devel-uname-r == ${kernel_release}"; then
-    cat >&2 <<EOF
-ERROR: Fedora could not install the dependencies for the running kernel.
-If the exact kernel-devel package is no longer available, run:
-  sudo dnf upgrade --refresh
-  sudo reboot
-Then run this script again after rebooting into the updated kernel.
+    openssl-devel
+
+if ! "${dnf_command[@]}" install -y "kernel-devel-uname-r == ${kernel_release}"; then
+    kernel_arch="$(uname -m)"
+    kernel_nvr="${kernel_release%.${kernel_arch}}"
+    kernel_version="${kernel_nvr%%-*}"
+    kernel_package_release="${kernel_nvr#*-}"
+
+    [[ "$kernel_nvr" != "$kernel_release" && "$kernel_package_release" != "$kernel_nvr" ]] || \
+        fail "Could not derive a Fedora kernel-devel package name from $kernel_release."
+
+    archive_url="https://kojipkgs.fedoraproject.org/packages/kernel/${kernel_version}/${kernel_package_release}/${kernel_arch}/kernel-devel-${kernel_release}.rpm"
+    archive_dir="$(mktemp -d)"
+    trap 'rm -rf -- "$archive_dir"' EXIT
+    archive_rpm="${archive_dir}/kernel-devel-${kernel_release}.rpm"
+
+    echo "The exact package is no longer in the active Fedora repositories."
+    echo "Trying Fedora's official Koji archive instead; the system kernel will not be upgraded."
+    if ! curl --fail --location --proto '=https' --output "$archive_rpm" "$archive_url"; then
+        cat >&2 <<EOF
+ERROR: Fedora's archive does not contain kernel-devel for $kernel_release.
+Do not upgrade to kernel 7 solely for this Moxa driver; Moxa v6.0 supports
+kernel 6.x only. Keep the installed 6.x kernel and obtain its exact
+kernel-devel RPM, or obtain a kernel 7-compatible driver from Moxa.
+Archive URL checked:
+  $archive_url
 EOF
-    exit 1
+        exit 1
+    fi
+
+    command -v rpmkeys >/dev/null 2>&1 || fail "rpmkeys is required to verify the archived Fedora package."
+    rpmkeys --checksig "$archive_rpm" | grep -q "signatures OK" || \
+        fail "Fedora signature verification failed for the archived kernel-devel package."
+    "${dnf_command[@]}" install -y "$archive_rpm" || \
+        fail "The archived kernel-devel package was verified but could not be installed."
 fi
 
 for required_command in gcc make setserial tar sha512sum; do
