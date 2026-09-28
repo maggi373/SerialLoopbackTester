@@ -50,6 +50,18 @@ python serial_tester_gui.py
 
 ### Linux
 
+For production use directly from a repository checkout, run this one command from the repository root:
+
+```bash
+bash ./run_production.sh
+```
+
+The runner creates an isolated `.venv-production`, installs only the runtime requirements, updates them when `requirements.txt` changes, verifies Python and Tk, and then launches the application. To run with unrestricted serial-device access while retaining the desktop user's settings, use:
+
+```bash
+bash ./run_production.sh --root
+```
+
 Install Python, Tk, and virtual-environment support (Debian/Ubuntu example):
 
 ```bash
@@ -98,7 +110,7 @@ For immediate unrestricted serial-port access, use the included root startup scr
 
 Both startup scripts pass any command-line arguments through to the packaged executable. `run_as_root.sh` is also included as a compatibility alias for direct use.
 
-This runs the full application as root, so its settings may be stored under root's config directory. To make access persistent while running the application as your normal account, install the included udev rules and group membership instead:
+The root startup script still reads and writes the desktop user's normal settings file, and saved files retain that user's ownership. This avoids separate `/root/.config` settings and allows switching between normal and privileged launches. If the user settings file does not exist yet, an older configuration created under `/root/.config/SerialLoopbackTester/` is migrated automatically. To make serial access persistent while running the application as your normal account, install the included udev rules and group membership instead:
 
 ```bash
 ./install_serial_access.sh
@@ -277,6 +289,7 @@ Both driver installers check for root access, Linux 6.x, matching kernel headers
 - On Windows, the app resolves this using the system **My Documents** known-folder API (works with localized folder names).
 - If no settings file exists there yet, the app does a one-time copy from legacy `%APPDATA%\SerialLoopbackTester\serial_tester_settings.json` (if present).
 - Linux settings path: `$XDG_CONFIG_HOME/SerialLoopbackTester/serial_tester_settings.json`, falling back to `~/.config/SerialLoopbackTester/serial_tester_settings.json`.
+- `start_as_root.sh` explicitly keeps this same user config path and file ownership instead of using `/root/.config`.
 - On Linux, an older settings file under `~/Documents/SerialLoopbackTester/` is migrated automatically.
 - The file is auto-created with default 40 RS232 entries and 8 RS485 entries on first run.
 - Settings are validated and normalized when loaded.

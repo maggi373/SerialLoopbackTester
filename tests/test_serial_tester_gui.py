@@ -244,6 +244,80 @@ class SerialTesterTests(unittest.TestCase):
                 Path(config_home) / app_module.APP_FOLDER_NAME,
             )
 
+    def test_root_launcher_config_override_takes_priority(self):
+        config_home = str(Path.cwd() / "desktop-user-config")
+        with patch.dict(
+            os.environ,
+            {
+                app_module.LINUX_CONFIG_HOME_OVERRIDE_ENV: config_home,
+                "XDG_CONFIG_HOME": str(Path.cwd() / "root-config"),
+            },
+            clear=False,
+        ):
+            self.assertEqual(
+                app_module.resolve_linux_config_folder(),
+                Path(config_home) / app_module.APP_FOLDER_NAME,
+            )
+
+    @patch.object(app_module.sys, "platform", "linux")
+    def test_linux_button_style_is_compacted_without_changing_windows(self):
+        configured = []
+        style = types.SimpleNamespace(configure=lambda name, **options: configured.append((name, options)))
+
+        app_module.configure_platform_styles(style)
+
+        self.assertEqual(configured, [("TButton", {"padding": app_module.LINUX_BUTTON_PADDING})])
+
+    @patch.object(app_module.sys, "platform", "win32")
+    def test_windows_button_style_is_not_overridden(self):
+        configured = []
+        style = types.SimpleNamespace(configure=lambda name, **options: configured.append((name, options)))
+
+        app_module.configure_platform_styles(style)
+
+        self.assertEqual(configured, [])
+
+    @patch.object(app_module.sys, "platform", "linux")
+    @patch.object(app_module.os, "geteuid", return_value=0, create=True)
+    def test_root_settings_save_restores_desktop_user_ownership(self, _geteuid):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "settings.json"
+            environment = {
+                app_module.LINUX_CONFIG_OWNER_UID_ENV: "1000",
+                app_module.LINUX_CONFIG_OWNER_GID_ENV: "1001",
+            }
+            with patch.dict(os.environ, environment, clear=False), patch.object(
+                app_module.os, "chown", create=True
+            ) as chown:
+                app_module.save_settings_file(path, app_module.default_settings())
+
+            chown.assert_called_once_with(path.with_name(f".{path.name}.tmp"), 1000, 1001)
+            self.assertTrue(path.exists())
+
+    @patch.object(app_module.sys, "platform", "linux")
+    @patch.object(app_module.os, "geteuid", return_value=0, create=True)
+    def test_root_launcher_migrates_previous_root_config(self, _geteuid):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root_home = Path(temp_dir) / "root"
+            user_config_home = Path(temp_dir) / "user-config"
+            previous_path = root_home / ".config" / app_module.APP_FOLDER_NAME / app_module.SETTINGS_FILENAME
+            previous_path.parent.mkdir(parents=True)
+            previous_path.write_text(json.dumps(app_module.default_settings()), encoding="utf-8")
+            environment = {
+                app_module.LINUX_CONFIG_HOME_OVERRIDE_ENV: str(user_config_home),
+                app_module.LINUX_CONFIG_OWNER_UID_ENV: "1000",
+                app_module.LINUX_CONFIG_OWNER_GID_ENV: "1001",
+            }
+            with (
+                patch.dict(os.environ, environment, clear=False),
+                patch.object(app_module.Path, "home", return_value=root_home),
+                patch.object(app_module.os, "chown", create=True),
+            ):
+                resolved = app_module.resolve_settings_path()
+
+            self.assertEqual(resolved, user_config_home / app_module.APP_FOLDER_NAME / app_module.SETTINGS_FILENAME)
+            self.assertEqual(resolved.read_text(encoding="utf-8"), previous_path.read_text(encoding="utf-8"))
+
     def test_rs232_paro_role_passively_answers_instead_of_sending_loopback_payload(self):
         events = queue.Queue()
         config = app_module.default_rs232_item(0)

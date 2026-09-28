@@ -58,10 +58,24 @@ class LinuxPackagingTests(unittest.TestCase):
         self.assertIn("SerialLoopbackTester-v*-linux-*", normal_script)
         self.assertIn('exec "${script_dir}/run_as_root.sh"', root_script)
 
+    def test_repository_production_runner_uses_isolated_runtime_environment(self):
+        script = (REPO_ROOT / "run_production.sh").read_text(encoding="utf-8")
+
+        self.assertIn(".venv-production", script)
+        self.assertIn("requirements.txt", script)
+        self.assertIn("import tkinter", script)
+        self.assertIn('if [[ "${1:-}" == "--root" ]]', script)
+        self.assertIn('exec "$venv_python" "${repo_dir}/serial_tester_gui.py"', script)
+
     def test_root_launcher_preserves_graphical_session_environment(self):
         script = (REPO_ROOT / "run_as_root.sh").read_text(encoding="utf-8")
 
         self.assertIn("sudo --preserve-env=DISPLAY,XAUTHORITY,WAYLAND_DISPLAY,XDG_RUNTIME_DIR,DBUS_SESSION_BUS_ADDRESS", script)
+        self.assertIn('SERIAL_LOOPBACK_TESTER_CONFIG_HOME="$config_home"', script)
+        self.assertIn('SERIAL_LOOPBACK_TESTER_CONFIG_UID="$config_uid"', script)
+        self.assertIn('SERIAL_LOOPBACK_TESTER_CONFIG_GID="$config_gid"', script)
+        self.assertIn('${script_dir}/.venv-production', script)
+        self.assertIn('${source_venv}/bin/python', script)
         self.assertIn("SerialLoopbackTester-v*-linux-*", script)
 
     def test_serial_access_installer_covers_usb_and_moxa_tty_devices(self):

@@ -60,6 +60,10 @@ RS232_MODE_RS485_REPLY = "rs485_reply"
 RS232_MODE_PARO = "paro"
 DEFAULT_PARO_DEVICE_ID = 1
 APP_FOLDER_NAME = "SerialLoopbackTester"
+LINUX_CONFIG_HOME_OVERRIDE_ENV = "SERIAL_LOOPBACK_TESTER_CONFIG_HOME"
+LINUX_CONFIG_OWNER_UID_ENV = "SERIAL_LOOPBACK_TESTER_CONFIG_UID"
+LINUX_CONFIG_OWNER_GID_ENV = "SERIAL_LOOPBACK_TESTER_CONFIG_GID"
+LINUX_BUTTON_PADDING = (3, 1)
 STOPBITS_ALLOWED_VALUES = (1.0, 1.5, 2.0)
 RS232_WORKER_CONFIG_KEYS = (
     "enabled",
@@ -666,6 +670,9 @@ def save_settings_file(path: Path, settings: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.with_name(f".{path.name}.tmp")
     temp_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    owner = linux_config_owner_from_environment()
+    if owner is not None:
+        os.chown(temp_path, *owner)
     os.replace(temp_path, path)
 
 
@@ -690,11 +697,32 @@ def resolve_documents_folder() -> Path:
 
 
 def resolve_linux_config_folder() -> Path:
+    override = os.environ.get(LINUX_CONFIG_HOME_OVERRIDE_ENV, "").strip()
+    if override:
+        override_home = Path(override).expanduser()
+        if override_home.is_absolute():
+            return override_home / APP_FOLDER_NAME
+
     configured = os.environ.get("XDG_CONFIG_HOME", "").strip()
     config_home = Path(configured).expanduser() if configured else Path.home() / ".config"
     if not config_home.is_absolute():
         config_home = Path.home() / ".config"
     return config_home / APP_FOLDER_NAME
+
+
+def linux_config_owner_from_environment() -> tuple[int, int] | None:
+    if not sys.platform.startswith("linux") or getattr(os, "geteuid", lambda: -1)() != 0:
+        return None
+    uid_text = os.environ.get(LINUX_CONFIG_OWNER_UID_ENV, "").strip()
+    gid_text = os.environ.get(LINUX_CONFIG_OWNER_GID_ENV, "").strip()
+    if not uid_text.isdigit() or not gid_text.isdigit():
+        return None
+    return int(uid_text), int(gid_text)
+
+
+def configure_platform_styles(style: ttk.Style) -> None:
+    if sys.platform.startswith("linux"):
+        style.configure("TButton", padding=LINUX_BUTTON_PADDING)
 
 
 def resolve_settings_path() -> Path:
@@ -704,8 +732,21 @@ def resolve_settings_path() -> Path:
     else:
         base = resolve_documents_folder() / APP_FOLDER_NAME
         legacy_base = None
+    config_root = base.parent
+    config_root_existed = config_root.exists()
     base.mkdir(parents=True, exist_ok=True, mode=0o700)
+    owner = linux_config_owner_from_environment()
+    if owner is not None:
+        if not config_root_existed:
+            os.chown(config_root, *owner)
+        os.chown(base, *owner)
     settings_path = base / SETTINGS_FILENAME
+
+    if not settings_path.exists() and owner is not None:
+        previous_root_path = Path.home() / ".config" / APP_FOLDER_NAME / SETTINGS_FILENAME
+        if previous_root_path != settings_path and previous_root_path.exists():
+            shutil.copyfile(previous_root_path, settings_path)
+            os.chown(settings_path, *owner)
 
     if not settings_path.exists() and legacy_base is not None:
         legacy_path = legacy_base / SETTINGS_FILENAME
@@ -1102,6 +1143,8 @@ class SerialTesterApp(tk.Tk):
         self.title("Serial Loopback Tester")
         self.geometry("1500x900")
         self.minsize(1200, 720)
+        self.platform_style = ttk.Style(self)
+        configure_platform_styles(self.platform_style)
 
         self.settings_path = resolve_settings_path()
         is_first_launch = not self.settings_path.exists()
