@@ -7,6 +7,7 @@ import os
 import queue
 import re
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -59,6 +60,23 @@ RS232_MODE_LOOPBACK = "loopback"
 RS232_MODE_RS485_REPLY = "rs485_reply"
 RS232_MODE_PARO = "paro"
 DEFAULT_PARO_DEVICE_ID = 1
+LINUX_SETSERIAL_MODE_NONE = "none"
+LINUX_SETSERIAL_MODE_LABELS = {
+    LINUX_SETSERIAL_MODE_NONE: "Do not change",
+    "rs232": "RS-232 (port 0)",
+    "rs485-2w": "RS-485 2-wire (port 1)",
+    "rs422": "RS-422 (port 2)",
+    "rs485-4w": "RS-485 4-wire (port 3)",
+}
+LINUX_SETSERIAL_MODE_CODES = {
+    "rs232": 0,
+    "rs485-2w": 1,
+    "rs422": 2,
+    "rs485-4w": 3,
+}
+LINUX_SETSERIAL_MODE_OPTIONS = tuple(
+    label for mode, label in LINUX_SETSERIAL_MODE_LABELS.items() if mode != LINUX_SETSERIAL_MODE_NONE
+)
 APP_FOLDER_NAME = "SerialLoopbackTester"
 LINUX_CONFIG_HOME_OVERRIDE_ENV = "SERIAL_LOOPBACK_TESTER_CONFIG_HOME"
 LINUX_CONFIG_OWNER_UID_ENV = "SERIAL_LOOPBACK_TESTER_CONFIG_UID"
@@ -202,6 +220,62 @@ def normalize_port_text(value: object) -> str:
     if len(text) > 3 and text[:3].casefold() == "com" and text[3:].isdigit():
         return text.upper()
     return text
+
+
+def normalize_linux_setserial_mode(value: object) -> str:
+    normalized = str(value if value is not None else "").strip().casefold()
+    aliases = {
+        "": LINUX_SETSERIAL_MODE_NONE,
+        "none": LINUX_SETSERIAL_MODE_NONE,
+        "do not change": LINUX_SETSERIAL_MODE_NONE,
+        "0": "rs232",
+        "rs232": "rs232",
+        "rs-232": "rs232",
+        "rs-232 (port 0)": "rs232",
+        "1": "rs485-2w",
+        "rs485-2w": "rs485-2w",
+        "rs-485 2-wire": "rs485-2w",
+        "rs-485 2-wire (port 1)": "rs485-2w",
+        "2": "rs422",
+        "rs422": "rs422",
+        "rs-422": "rs422",
+        "rs-422 (port 2)": "rs422",
+        "3": "rs485-4w",
+        "rs485-4w": "rs485-4w",
+        "rs-485 4-wire": "rs485-4w",
+        "rs-485 4-wire (port 3)": "rs485-4w",
+    }
+    return aliases.get(normalized, LINUX_SETSERIAL_MODE_NONE)
+
+
+def linux_setserial_mode_label(value: object) -> str:
+    return LINUX_SETSERIAL_MODE_LABELS[normalize_linux_setserial_mode(value)]
+
+
+def apply_linux_setserial_mode(port_name: object, mode: object) -> None:
+    normalized_mode = normalize_linux_setserial_mode(mode)
+    if normalized_mode == LINUX_SETSERIAL_MODE_NONE or not sys.platform.startswith("linux"):
+        return
+
+    endpoint = normalize_port_text(port_name)
+    if "://" in endpoint or not endpoint.startswith("/dev/"):
+        raise ValueError("setserial interface mode requires a local /dev/... serial device.")
+
+    setserial_path = shutil.which("setserial")
+    if not setserial_path:
+        raise OSError("setserial is not installed (Fedora: sudo dnf install setserial).")
+
+    mode_code = LINUX_SETSERIAL_MODE_CODES[normalized_mode]
+    try:
+        subprocess.run(
+            [setserial_path, endpoint, "port", str(mode_code)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or str(exc)).strip()
+        raise OSError(f"setserial failed for {endpoint} using port {mode_code}: {detail}") from exc
 
 
 def open_serial_endpoint(
@@ -1365,6 +1439,7 @@ class SerialTesterApp(tk.Tk):
         rs232_tab = ttk.Frame(self.notebook, padding=(8, 8))
         rs485_tab = ttk.Frame(self.notebook, padding=(8, 8))
         settings_tab = ttk.Frame(self.notebook, padding=(8, 8))
+        linux_setserial_tab = ttk.Frame(self.notebook, padding=(16, 16)) if sys.platform.startswith("linux") else None
         log_tab = ttk.Frame(self.notebook, padding=(8, 8))
 
         self.notebook.add(overview_tab, text="Overview")
@@ -1374,6 +1449,8 @@ class SerialTesterApp(tk.Tk):
         self.notebook.add(rs232_tab, text="RS232 Monitor")
         self.notebook.add(rs485_tab, text="RS485 Monitor")
         self.notebook.add(settings_tab, text="Settings")
+        if linux_setserial_tab is not None:
+            self.notebook.add(linux_setserial_tab, text="Linux setserial")
         self.notebook.add(log_tab, text="Log")
         self.notebook.bind("<<NotebookTabChanged>>", self._on_notebook_tab_changed)
 
@@ -1384,6 +1461,8 @@ class SerialTesterApp(tk.Tk):
         self.rs232_tree = self._build_rs232_monitor_tree(rs232_tab)
         self.rs485_tree = self._build_rs485_monitor_tree(rs485_tab)
         self._build_settings_tab(settings_tab)
+        if linux_setserial_tab is not None:
+            self._build_linux_setserial_tab(linux_setserial_tab)
         self._build_log_tab(log_tab)
 
     def set_fullscreen(self, enabled: bool) -> None:
@@ -1444,7 +1523,7 @@ class SerialTesterApp(tk.Tk):
             error_text = str(exc)
 
         self.com_port_values = [""] + ports
-        for attr in ("rs232_port_combo", "rs485_sender_combo"):
+        for attr in ("rs232_port_combo", "rs485_sender_combo", "linux_setserial_device_combo"):
             combo = getattr(self, attr, None)
             if combo is not None:
                 combo.configure(values=self.com_port_values)
@@ -3071,6 +3150,118 @@ class SerialTesterApp(tk.Tk):
             command=self.apply_rs485_common_changes_to_all,
         ).grid(row=row, column=0, columnspan=2, sticky="ew", pady=(6, 0))
         self._enable_port_editor_mousewheel(editor, editor_canvas)
+
+    def _build_linux_setserial_tab(self, parent: ttk.Frame) -> None:
+        parent.columnconfigure(0, weight=1)
+
+        panel = ttk.LabelFrame(parent, text="Apply Linux serial interface mode", padding=16)
+        panel.grid(row=0, column=0, sticky="new")
+        panel.columnconfigure(1, weight=1)
+
+        ttk.Label(
+            panel,
+            text=(
+                "This panel runs setserial only when Apply is clicked. It never changes a mode while tests start, "
+                "ports open, or devices reconnect."
+            ),
+            wraplength=900,
+            justify=tk.LEFT,
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 12))
+
+        self.linux_setserial_device_var = tk.StringVar()
+        self.linux_setserial_mode_var = tk.StringVar(value=LINUX_SETSERIAL_MODE_OPTIONS[0])
+        self.linux_setserial_command_var = tk.StringVar()
+        self.linux_setserial_status_var = tk.StringVar(value="No command has been run.")
+
+        ttk.Label(panel, text="Device").grid(row=1, column=0, sticky="w", pady=4, padx=(0, 12))
+        self.linux_setserial_device_combo = ttk.Combobox(
+            panel,
+            textvariable=self.linux_setserial_device_var,
+            values=self.com_port_values,
+            state="normal",
+        )
+        self.linux_setserial_device_combo.grid(row=1, column=1, sticky="ew", pady=4)
+
+        ttk.Label(panel, text="Interface mode").grid(row=2, column=0, sticky="w", pady=4, padx=(0, 12))
+        ttk.Combobox(
+            panel,
+            textvariable=self.linux_setserial_mode_var,
+            values=LINUX_SETSERIAL_MODE_OPTIONS,
+            state="readonly",
+        ).grid(row=2, column=1, sticky="ew", pady=4)
+
+        ttk.Label(panel, text="Command").grid(row=3, column=0, sticky="nw", pady=4, padx=(0, 12))
+        ttk.Label(
+            panel,
+            textvariable=self.linux_setserial_command_var,
+            font="TkFixedFont",
+            wraplength=900,
+            justify=tk.LEFT,
+        ).grid(row=3, column=1, sticky="ew", pady=4)
+
+        actions = ttk.Frame(panel)
+        actions.grid(row=4, column=0, columnspan=2, sticky="w", pady=(12, 8))
+        ttk.Button(actions, text="Apply with setserial", command=self.apply_linux_setserial_from_panel).pack(
+            side=tk.LEFT, padx=(0, 8)
+        )
+        ttk.Button(
+            actions,
+            text="Refresh Devices",
+            command=lambda: self.refresh_com_port_options(show_message=True),
+        ).pack(side=tk.LEFT)
+
+        ttk.Label(
+            panel,
+            textvariable=self.linux_setserial_status_var,
+            wraplength=900,
+            justify=tk.LEFT,
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 0))
+
+        ttk.Label(
+            parent,
+            text=(
+                "Mode values: port 0 = RS-232, port 1 = RS-485 2-wire, port 2 = RS-422, "
+                "port 3 = RS-485 4-wire. The Moxa driver and setserial package must be installed, "
+                "and changing the mode normally requires root privileges."
+            ),
+            wraplength=950,
+            justify=tk.LEFT,
+        ).grid(row=1, column=0, sticky="w", pady=(14, 0))
+
+        self.linux_setserial_device_var.trace_add("write", self._update_linux_setserial_command_preview)
+        self.linux_setserial_mode_var.trace_add("write", self._update_linux_setserial_command_preview)
+        self._update_linux_setserial_command_preview()
+
+    def _update_linux_setserial_command_preview(self, *_args: object) -> None:
+        device = normalize_port_text(self.linux_setserial_device_var.get()) or "/dev/ttyUSB0"
+        mode = normalize_linux_setserial_mode(self.linux_setserial_mode_var.get())
+        mode_code = LINUX_SETSERIAL_MODE_CODES.get(mode, 0)
+        self.linux_setserial_command_var.set(f"setserial {device} port {mode_code}")
+
+    def apply_linux_setserial_from_panel(self) -> None:
+        device = normalize_port_text(self.linux_setserial_device_var.get())
+        mode = normalize_linux_setserial_mode(self.linux_setserial_mode_var.get())
+        if not device:
+            messagebox.showerror("Select device", "Select or enter a local /dev/... serial device.")
+            return
+        if mode not in LINUX_SETSERIAL_MODE_CODES:
+            messagebox.showerror("Select mode", "Select one of the four setserial interface modes.")
+            return
+        try:
+            apply_linux_setserial_mode(device, mode)
+        except (OSError, ValueError) as exc:
+            detail = serial_error_detail(exc)
+            self.linux_setserial_status_var.set(f"FAILED: {detail}")
+            messagebox.showerror("setserial failed", detail)
+            self.append_log(f"setserial failed for {device}: {detail}")
+            return
+
+        mode_code = LINUX_SETSERIAL_MODE_CODES[mode]
+        mode_label = linux_setserial_mode_label(mode)
+        result = f"Applied {mode_label} to {device}: setserial {device} port {mode_code}"
+        self.linux_setserial_status_var.set(result)
+        self.append_log(result)
+        messagebox.showinfo("setserial applied", result)
 
     def _build_log_tab(self, parent: ttk.Frame) -> None:
         parent.columnconfigure(0, weight=1)

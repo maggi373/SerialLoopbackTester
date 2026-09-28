@@ -129,6 +129,15 @@ getent group dialout
 
 The `usermod` command above adds the currently logged-in Fedora user to `dialout`; do not replace `$USER` with `root`. Log out of the desktop completely and back in, then verify with `id -nG` before starting the application. Using `/dev/serial/by-id/...` in the application is recommended because `/dev/ttyUSBn` numbers can change after reconnecting devices.
 
+The Linux build also provides a **Linux setserial** tab. Select or type a local `/dev/...` device, select an interface mode, review the displayed command, and click **Apply with setserial**. Commands are only executed by that button; starting tests and reconnecting ports never changes the electrical interface automatically. The mode mapping is:
+
+- `port 0`: RS-232
+- `port 1`: RS-485 two-wire
+- `port 2`: RS-422
+- `port 3`: RS-485 four-wire
+
+Run the application with `bash ./run_production.sh --root` or the packaged `./start_as_root.sh` when the driver requires root permission for this operation.
+
 To compile the bundled Moxa kernel modules on Fedora, install the compiler and development files matching the currently running kernel:
 
 ```bash

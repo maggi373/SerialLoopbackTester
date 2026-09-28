@@ -224,6 +224,46 @@ class SerialTesterTests(unittest.TestCase):
         local_open.assert_called_once_with(port="/dev/ttyUSB0", **options)
         url_open.assert_not_called()
 
+    def test_opening_serial_port_never_applies_setserial_automatically(self):
+        with (
+            patch.object(app_module, "apply_linux_setserial_mode") as apply_mode,
+            patch.object(app_module.serial, "Serial", return_value=object()),
+        ):
+            app_module.open_serial_endpoint(
+                "/dev/ttyUSB0",
+                baudrate=19200,
+                bytesize=8,
+                parity="N",
+                stopbits=1.0,
+                timeout=1.0,
+                write_timeout=1.0,
+            )
+
+        apply_mode.assert_not_called()
+
+    @patch.object(app_module.sys, "platform", "linux")
+    def test_setserial_mode_mapping_and_explicit_command(self):
+        expected = {
+            "rs232": 0,
+            "rs485-2w": 1,
+            "rs422": 2,
+            "rs485-4w": 3,
+        }
+        self.assertEqual(app_module.LINUX_SETSERIAL_MODE_CODES, expected)
+
+        with (
+            patch.object(app_module.shutil, "which", return_value="/usr/bin/setserial"),
+            patch.object(app_module.subprocess, "run") as run,
+        ):
+            app_module.apply_linux_setserial_mode("/dev/ttyUSB1", "RS-485 2-wire (port 1)")
+
+        run.assert_called_once_with(
+            ["/usr/bin/setserial", "/dev/ttyUSB1", "port", "1"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
     def test_unsupported_serial_url_explains_raw_tcp_format(self):
         with self.assertRaisesRegex(ValueError, "socket://host:port"):
             app_module.open_serial_endpoint(
