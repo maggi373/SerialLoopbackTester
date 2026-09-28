@@ -31,6 +31,7 @@ Python GUI tool for:
 - Auto-start tests 2 seconds after launch (default ON)
 - Optional startup setting: launch in fullscreen by default
 - Optional startup setting (default ON): delay communications by 2 seconds
+- On Linux, the RS232 and RS485 settings editors have independent vertical scrolling so every field and Apply button remains accessible at larger desktop scaling
 
 ![solder.py](https://files.thorfusion.com/images/serial.jpg)
 

@@ -277,6 +277,15 @@ class SerialTesterTests(unittest.TestCase):
 
         self.assertEqual(configured, [])
 
+    def test_linux_editor_mousewheel_supports_x11_and_delta_events(self):
+        scroll_units = app_module.SerialTesterApp._editor_scroll_units
+
+        self.assertEqual(scroll_units(types.SimpleNamespace(num=4, delta=0)), -3)
+        self.assertEqual(scroll_units(types.SimpleNamespace(num=5, delta=0)), 3)
+        self.assertEqual(scroll_units(types.SimpleNamespace(num=None, delta=120)), -3)
+        self.assertEqual(scroll_units(types.SimpleNamespace(num=None, delta=-240)), 6)
+        self.assertEqual(scroll_units(types.SimpleNamespace(num=None, delta=0)), 0)
+
     @patch.object(app_module.sys, "platform", "linux")
     @patch.object(app_module.os, "geteuid", return_value=0, create=True)
     def test_root_settings_save_restores_desktop_user_ownership(self, _geteuid):

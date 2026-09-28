@@ -2780,6 +2780,77 @@ class SerialTesterApp(tk.Tk):
             f"(baudrate={values['baudrate']}, interval={values['interval_ms']} ms, packet={values['packet_size']} bytes)."
         )
 
+    @staticmethod
+    def _editor_scroll_units(event: object) -> int:
+        button_number = getattr(event, "num", None)
+        if button_number == 4:
+            return -3
+        if button_number == 5:
+            return 3
+        delta = int(getattr(event, "delta", 0) or 0)
+        if delta == 0:
+            return 0
+        steps = max(abs(delta) // 120, 1)
+        return -steps * 3 if delta > 0 else steps * 3
+
+    def _create_port_settings_editor(
+        self,
+        parent: ttk.Frame,
+        title: str,
+    ) -> tuple[ttk.LabelFrame, tk.Canvas | None]:
+        if not sys.platform.startswith("linux"):
+            editor = ttk.LabelFrame(parent, text=title, padding=10)
+            editor.grid(row=1, column=1, sticky="nsew")
+            editor.columnconfigure(1, weight=1)
+            return editor, None
+
+        holder = ttk.Frame(parent)
+        holder.grid(row=1, column=1, sticky="nsew")
+        holder.columnconfigure(0, weight=1)
+        holder.rowconfigure(0, weight=1)
+
+        canvas_options: dict[str, object] = {"highlightthickness": 0, "borderwidth": 0}
+        frame_background = self.platform_style.lookup("TFrame", "background")
+        if frame_background:
+            canvas_options["background"] = frame_background
+        canvas = tk.Canvas(holder, **canvas_options)
+        scrollbar = ttk.Scrollbar(holder, orient=tk.VERTICAL, command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+
+        editor = ttk.LabelFrame(canvas, text=title, padding=10)
+        editor.columnconfigure(1, weight=1)
+        editor_window = canvas.create_window((0, 0), window=editor, anchor="nw")
+        editor.bind(
+            "<Configure>",
+            lambda _event: canvas.configure(scrollregion=canvas.bbox("all")),
+        )
+        canvas.bind(
+            "<Configure>",
+            lambda event: canvas.itemconfigure(editor_window, width=event.width),
+        )
+        return editor, canvas
+
+    def _enable_port_editor_mousewheel(self, editor: ttk.LabelFrame, canvas: tk.Canvas | None) -> None:
+        if canvas is None:
+            return
+
+        def scroll(event: object) -> str | None:
+            units = self._editor_scroll_units(event)
+            if units:
+                canvas.yview_scroll(units, "units")
+                return "break"
+            return None
+
+        pending = [editor]
+        while pending:
+            widget = pending.pop()
+            widget.bind("<MouseWheel>", scroll, add="+")
+            widget.bind("<Button-4>", scroll, add="+")
+            widget.bind("<Button-5>", scroll, add="+")
+            pending.extend(widget.winfo_children())
+
     def _build_rs232_settings_section(self, parent: ttk.Frame) -> None:
         parent.columnconfigure(0, weight=3)
         parent.columnconfigure(1, weight=2)
@@ -2832,9 +2903,7 @@ class SerialTesterApp(tk.Tk):
         rs232_scroll.grid(row=0, column=1, sticky="ns")
         self.rs232_settings_tree.bind("<<TreeviewSelect>>", self._on_rs232_settings_select)
 
-        editor = ttk.LabelFrame(parent, text="Edit Selected RS232 Port", padding=10)
-        editor.grid(row=1, column=1, sticky="nsew")
-        editor.columnconfigure(1, weight=1)
+        editor, editor_canvas = self._create_port_settings_editor(parent, "Edit Selected RS232 Port")
 
         self.rs232_var_enabled = tk.BooleanVar(value=True)
         self.rs232_var_name = tk.StringVar()
@@ -2891,6 +2960,7 @@ class SerialTesterApp(tk.Tk):
             text="Apply To All RS232 (Keep Name/Port)",
             command=self.apply_rs232_common_changes_to_all,
         ).grid(row=row, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        self._enable_port_editor_mousewheel(editor, editor_canvas)
 
     def _build_rs485_settings_section(self, parent: ttk.Frame) -> None:
         parent.columnconfigure(0, weight=3)
@@ -2949,9 +3019,7 @@ class SerialTesterApp(tk.Tk):
         rs485_scroll.grid(row=0, column=1, sticky="ns")
         self.rs485_settings_tree.bind("<<TreeviewSelect>>", self._on_rs485_settings_select)
 
-        editor = ttk.LabelFrame(parent, text="Edit Selected RS485 Port", padding=10)
-        editor.grid(row=1, column=1, sticky="nsew")
-        editor.columnconfigure(1, weight=1)
+        editor, editor_canvas = self._create_port_settings_editor(parent, "Edit Selected RS485 Port")
 
         self.rs485_var_enabled = tk.BooleanVar(value=True)
         self.rs485_var_name = tk.StringVar()
@@ -3002,6 +3070,7 @@ class SerialTesterApp(tk.Tk):
             text="Apply To All RS485 (Keep Name/Port)",
             command=self.apply_rs485_common_changes_to_all,
         ).grid(row=row, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        self._enable_port_editor_mousewheel(editor, editor_canvas)
 
     def _build_log_tab(self, parent: ttk.Frame) -> None:
         parent.columnconfigure(0, weight=1)
