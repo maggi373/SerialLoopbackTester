@@ -1,4 +1,4 @@
-c:\Users\magna\Downloads\begravelse pappa.zip#!/usr/bin/env bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 driver_archive="moxa-uport-1100-series-linux-kernel-6.x-driver-v6.0.tgz"
