@@ -269,12 +269,6 @@ class SerialTesterTests(unittest.TestCase):
         apply_mode.assert_called_once_with(
             "/dev/ttyUSB0",
             "rs485-2w",
-            baudrate=19200,
-            bytesize=8,
-            parity="N",
-            stopbits=1.0,
-            xonxoff=False,
-            rtscts=False,
         )
 
     @patch.object(app_module.sys, "platform", "linux")
