@@ -977,6 +977,8 @@ class RS232Worker(threading.Thread):
         fail_inc: int = 0,
         error_inc: int = 0,
         log: bool = False,
+        tx_hex: str | None = None,
+        rx_hex: str | None = None,
     ) -> None:
         self.event_queue.put(
             {
@@ -989,6 +991,8 @@ class RS232Worker(threading.Thread):
                 "fail_inc": fail_inc,
                 "error_inc": error_inc,
                 "log": log,
+                "tx_hex": tx_hex,
+                "rx_hex": rx_hex,
             }
         )
 
@@ -1012,6 +1016,9 @@ class RS232Worker(threading.Thread):
         while not self.stop_event.is_set():
             waiting = max(int(getattr(port, "in_waiting", 0)), 0)
             received = port.read(max(1, waiting))
+            if received:
+                received_hex = received.hex(" ").upper()
+                self.emit("Running", f"PARO RX {received_hex}", rx_hex=received_hex)
             responses = simulator.feed(received) if received else simulator.poll()
             for response in responses:
                 written = port.write(response)
@@ -1021,7 +1028,12 @@ class RS232Worker(threading.Thread):
                 preview = response.decode("ascii", errors="backslashreplace").strip()
                 if len(preview) > 160:
                     preview = preview[:157] + "..."
-                self.emit("PASS", f"PARO TX {preview}", pass_inc=1)
+                self.emit(
+                    "PASS",
+                    f"PARO TX {preview}",
+                    pass_inc=1,
+                    tx_hex=response.hex(" ").upper(),
+                )
 
             pending_baud = simulator.take_pending_baud()
             if pending_baud is not None:
@@ -1094,6 +1106,8 @@ class RS232Worker(threading.Thread):
                 f"echoed TX {reply_hex} ({written} bytes) on the same port; "
                 f"total RX {received_total} bytes",
                 pass_inc=1,
+                tx_hex=reply_hex,
+                rx_hex=reply_hex,
             )
 
     def run(self) -> None:
@@ -1169,17 +1183,30 @@ class RS232Worker(threading.Thread):
                                 break
 
                             if written == len(payload) and rx == payload:
-                                self.emit("PASS", f"TX/RX {payload_hex}", pass_inc=1)
+                                self.emit(
+                                    "PASS",
+                                    f"TX/RX {payload_hex}",
+                                    pass_inc=1,
+                                    tx_hex=payload_hex,
+                                    rx_hex=payload_hex,
+                                )
                             else:
                                 rx_hex = rx.hex(" ").upper() if rx else "<none>"
                                 if time.monotonic() < failure_grace_deadline:
-                                    self.emit("Running", f"Grace period: TX {payload_hex} RX {rx_hex} (failure ignored)")
+                                    self.emit(
+                                        "Running",
+                                        f"Grace period: TX {payload_hex} RX {rx_hex} (failure ignored)",
+                                        tx_hex=payload_hex,
+                                        rx_hex=rx_hex,
+                                    )
                                 else:
                                     self.emit(
                                         "FAIL",
                                         f"TX {payload_hex} RX {rx_hex}",
                                         fail_inc=1,
                                         log=True,
+                                        tx_hex=payload_hex,
+                                        rx_hex=rx_hex,
                                     )
 
                             if self.stop_event.wait(interval_s):
@@ -1235,6 +1262,8 @@ class RS485PairWorker(threading.Thread):
         fail_inc: int = 0,
         error_inc: int = 0,
         log: bool = False,
+        tx_hex: str | None = None,
+        rx_hex: str | None = None,
     ) -> None:
         self.event_queue.put(
             {
@@ -1247,6 +1276,8 @@ class RS485PairWorker(threading.Thread):
                 "fail_inc": fail_inc,
                 "error_inc": error_inc,
                 "log": log,
+                "tx_hex": tx_hex,
+                "rx_hex": rx_hex,
             }
         )
 
@@ -1326,6 +1357,8 @@ class RS485PairWorker(threading.Thread):
                                 "PASS",
                                 f"Request TX {payload_hex}; echoed reply RX {payload_hex}",
                                 pass_inc=1,
+                                tx_hex=payload_hex,
+                                rx_hex=payload_hex,
                             )
                         else:
                             bounced_hex = bounced.hex(" ").upper() if bounced else "<none>"
@@ -1334,6 +1367,8 @@ class RS485PairWorker(threading.Thread):
                                     "Running",
                                     f"Grace period: request TX {payload_hex}; reply RX {bounced_hex} "
                                     f"(expected echoed {payload_hex}, failure ignored)",
+                                    tx_hex=payload_hex,
+                                    rx_hex=bounced_hex,
                                 )
                             else:
                                 self.emit(
@@ -1342,6 +1377,8 @@ class RS485PairWorker(threading.Thread):
                                     f"expected echoed {payload_hex}",
                                     fail_inc=1,
                                     log=True,
+                                    tx_hex=payload_hex,
+                                    rx_hex=bounced_hex,
                                 )
 
                         if self.stop_event.wait(interval_s):
@@ -1485,7 +1522,15 @@ class SerialTesterApp(tk.Tk):
 
     @staticmethod
     def new_state() -> dict:
-        return {"status": "Idle", "pass_count": 0, "fail_count": 0, "error_count": 0, "last": ""}
+        return {
+            "status": "Idle",
+            "pass_count": 0,
+            "fail_count": 0,
+            "error_count": 0,
+            "tx_hex": "",
+            "rx_hex": "",
+            "last": "",
+        }
 
     @staticmethod
     def _format_duration(total_seconds: float) -> str:
@@ -2294,7 +2339,19 @@ class SerialTesterApp(tk.Tk):
         parent.columnconfigure(0, weight=1)
         parent.rowconfigure(0, weight=1)
 
-        columns = ("idx", "enabled", "name", "port", "mode", "status", "pass", "fail", "last")
+        columns = (
+            "idx",
+            "enabled",
+            "name",
+            "port",
+            "mode",
+            "status",
+            "tx",
+            "rx",
+            "pass",
+            "fail",
+            "last",
+        )
         tree = ttk.Treeview(parent, columns=columns, show="headings", height=24)
 
         headings = {
@@ -2304,6 +2361,8 @@ class SerialTesterApp(tk.Tk):
             "port": "Port",
             "mode": "Role",
             "status": "Status",
+            "tx": "TX Hex",
+            "rx": "RX Hex",
             "pass": "Pass",
             "fail": "Fail",
             "last": "Last Result",
@@ -2315,14 +2374,20 @@ class SerialTesterApp(tk.Tk):
             "port": 90,
             "mode": 120,
             "status": 90,
+            "tx": 160,
+            "rx": 160,
             "pass": 70,
             "fail": 70,
-            "last": 680,
+            "last": 360,
         }
 
         for col in columns:
             tree.heading(col, text=headings[col])
-            tree.column(col, width=widths[col], anchor=tk.W if col in {"name", "mode", "last"} else tk.CENTER)
+            tree.column(
+                col,
+                width=widths[col],
+                anchor=tk.W if col in {"name", "mode", "tx", "rx", "last"} else tk.CENTER,
+            )
 
         yscroll = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=tree.yview)
         tree.configure(yscrollcommand=yscroll.set)
@@ -2648,7 +2713,7 @@ class SerialTesterApp(tk.Tk):
         parent.columnconfigure(0, weight=1)
         parent.rowconfigure(0, weight=1)
 
-        columns = ("idx", "enabled", "name", "port", "status", "pass", "fail", "last")
+        columns = ("idx", "enabled", "name", "port", "status", "tx", "rx", "pass", "fail", "last")
         tree = ttk.Treeview(parent, columns=columns, show="headings", height=10)
 
         headings = {
@@ -2657,6 +2722,8 @@ class SerialTesterApp(tk.Tk):
             "name": "Name",
             "port": "RS485 Port",
             "status": "Status",
+            "tx": "TX Hex",
+            "rx": "RX Hex",
             "pass": "Pass",
             "fail": "Fail",
             "last": "Last Result",
@@ -2667,14 +2734,20 @@ class SerialTesterApp(tk.Tk):
             "name": 180,
             "port": 120,
             "status": 90,
+            "tx": 180,
+            "rx": 180,
             "pass": 70,
             "fail": 70,
-            "last": 720,
+            "last": 400,
         }
 
         for col in columns:
             tree.heading(col, text=headings[col])
-            tree.column(col, width=widths[col], anchor=tk.W if col in {"name", "last"} else tk.CENTER)
+            tree.column(
+                col,
+                width=widths[col],
+                anchor=tk.W if col in {"name", "tx", "rx", "last"} else tk.CENTER,
+            )
 
         yscroll = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=tree.yview)
         tree.configure(yscrollcommand=yscroll.set)
@@ -3648,6 +3721,8 @@ class SerialTesterApp(tk.Tk):
                     cfg["port"],
                     rs232_mode_label(cfg.get("mode")),
                     state["status"],
+                    state["tx_hex"],
+                    state["rx_hex"],
                     state["pass_count"],
                     state["fail_count"],
                     state["last"],
@@ -3692,6 +3767,8 @@ class SerialTesterApp(tk.Tk):
                     cfg["name"],
                     cfg["sender_port"],
                     state["status"],
+                    state["tx_hex"],
+                    state["rx_hex"],
                     state["pass_count"],
                     state["fail_count"],
                     state["last"],
@@ -4079,6 +4156,8 @@ class SerialTesterApp(tk.Tk):
                 state["pass_count"] = 0
                 state["fail_count"] = 0
                 state["error_count"] = 0
+                state["tx_hex"] = ""
+                state["rx_hex"] = ""
 
             if self._is_rs232_startable(idx):
                 state["status"] = "Starting"
@@ -4149,6 +4228,8 @@ class SerialTesterApp(tk.Tk):
                 state["pass_count"] = 0
                 state["fail_count"] = 0
                 state["error_count"] = 0
+                state["tx_hex"] = ""
+                state["rx_hex"] = ""
 
             if self._is_rs485_startable(idx):
                 state["status"] = "Starting"
@@ -4362,6 +4443,8 @@ class SerialTesterApp(tk.Tk):
             fail_inc = int(event.get("fail_inc", 0))
             error_inc = int(event.get("error_inc", 0))
             log = bool(event.get("log", False))
+            tx_hex = event.get("tx_hex")
+            rx_hex = event.get("rx_hex")
 
             if group == "rs232" and 0 <= idx < len(self.rs232_state):
                 current_worker = self.rs232_workers.get(idx)
@@ -4374,6 +4457,10 @@ class SerialTesterApp(tk.Tk):
                 state["pass_count"] += pass_inc
                 state["fail_count"] += fail_inc
                 state["error_count"] += error_inc
+                if tx_hex is not None:
+                    state["tx_hex"] = str(tx_hex)
+                if rx_hex is not None:
+                    state["rx_hex"] = str(rx_hex)
                 if last:
                     state["last"] = last
                 if fail_inc > 0:
@@ -4396,6 +4483,10 @@ class SerialTesterApp(tk.Tk):
                 state["pass_count"] += pass_inc
                 state["fail_count"] += fail_inc
                 state["error_count"] += error_inc
+                if tx_hex is not None:
+                    state["tx_hex"] = str(tx_hex)
+                if rx_hex is not None:
+                    state["rx_hex"] = str(rx_hex)
                 if last:
                     state["last"] = last
                 if fail_inc > 0:

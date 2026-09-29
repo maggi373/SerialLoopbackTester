@@ -516,6 +516,8 @@ class SerialTesterTests(unittest.TestCase):
         self.assertIn(config["port"], reply_event["last"])
         self.assertIn(f"received RX {rs485_payload.hex(' ').upper()}", reply_event["last"])
         self.assertIn(f"echoed TX {rs485_payload.hex(' ').upper()}", reply_event["last"])
+        self.assertEqual(reply_event["rx_hex"], rs485_payload.hex(" ").upper())
+        self.assertEqual(reply_event["tx_hex"], rs485_payload.hex(" ").upper())
         self.assertEqual(sum(event["fail_inc"] for event in events.queue), 0)
 
     def test_rs485_reply_collects_split_request_before_transmitting(self):
@@ -541,6 +543,9 @@ class SerialTesterTests(unittest.TestCase):
 
         self.assertEqual(port.writes, [bytes.fromhex(config["payload_hex"])])
         self.assertEqual(sum(event["fail_inc"] for event in events.queue), 1)
+        failure = next(event for event in events.queue if event["status"] == "FAIL")
+        self.assertEqual(failure["tx_hex"], bytes.fromhex(config["payload_hex"]).hex(" ").upper())
+        self.assertEqual(failure["rx_hex"], unexpected.hex(" ").upper())
 
     def test_rs232_failures_are_ignored_during_two_second_grace_period(self):
         events = queue.Queue()
@@ -577,7 +582,9 @@ class SerialTesterTests(unittest.TestCase):
 
         self.assertEqual(worker.opened_names, [config["sender_port"]])
         self.assertEqual(port.writes, [payload])
-        self.assertIn("PASS", [event["status"] for event in events.queue])
+        pass_event = next(event for event in events.queue if event["status"] == "PASS")
+        self.assertEqual(pass_event["tx_hex"], payload.hex(" ").upper())
+        self.assertEqual(pass_event["rx_hex"], payload.hex(" ").upper())
         self.assertNotIn("echo_port", config)
 
     def test_port_open_failure_identifies_port_and_cause(self):

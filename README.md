@@ -11,6 +11,7 @@ Python GUI tool for:
 - Message mismatches are ignored for the first 2 seconds after communication starts on every channel; port-open and serial I/O errors remain visible
 - Customizable RS232 and RS485 counts from Settings (defaults: 40 and 8) (MAX: 256 and 128)
 - Combined Overview page for all ports/channels with color status bars and row outlines
+- RS232 and RS485 monitor tables show the most recent transmitted and received bytes in separate `TX Hex` and `RX Hex` columns
 - Overview supports compact 2-column row mode, 2-column card mode, and optional preset filtering
 - Live worker updates are batched, hidden tabs are not redrawn, and rendering pauses while the window is moving/resizing
 - Health summary block in Overview (alarm, counts, and recent failures)
