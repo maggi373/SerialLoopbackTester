@@ -1070,10 +1070,11 @@ class RS232Worker(threading.Thread):
 
     def open_port(self):
         read_timeout = float(self.config["timeout_s"])
-        if self.config.get("mode") in {
+        if self.config.get("mode") == RS232_MODE_THORSERIAL_REPLY:
+            read_timeout = min(read_timeout, 0.01)
+        elif self.config.get("mode") in {
             RS232_MODE_PARO,
             RS232_MODE_RS485_REPLY,
-            RS232_MODE_THORSERIAL_REPLY,
         }:
             read_timeout = min(read_timeout, 0.05)
         return open_serial_endpoint(
@@ -1252,7 +1253,10 @@ class RS232Worker(threading.Thread):
                 if len(candidate) != len(frame):
                     continue
 
-                if self.stop_event.wait(RS485_REPLY_MIN_TURNAROUND_S):
+                # ThorSerial has a short receive window. The complete request is
+                # already off the wire when its final byte reaches this parser,
+                # so do not add the generic RS485 reply turnaround delay here.
+                if self.stop_event.is_set():
                     return
                 written = port.write(frame)
                 port.flush()
@@ -1342,7 +1346,7 @@ class RS232Worker(threading.Thread):
                         self.emit(
                             "Running",
                             f"ThorSerial Reply listening on {port_name} at {serial_format_text(self.config)}; "
-                            "waits for the exact 16-byte ThorSerialV2 frame and echoes it once with no CRLF.",
+                            "waits for the exact 16-byte ThorSerialV2 frame and echoes it immediately with no CRLF.",
                             log=True,
                         )
                     else:

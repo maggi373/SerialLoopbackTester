@@ -8,7 +8,7 @@ Python GUI tool for:
 - PARO ports support addressed commands, independent device IDs, measurement ramps, configuration reads/writes, errors, held/continuous readings, and output masks based on the Arduino `parosim` implementation
 - 8 RS485 tests (RS485 sends -> an RS232 port in **RS485 Reply** role echoes the received bytes -> RS485 verifies the response)
 - RS485 reply routing is port-agnostic; any RS232 channel assigned the dedicated reply role is opened with the shared baud/framing settings of the enabled RS485 request rows, collects a complete configured request even when it arrives one byte at a time, and echoes those exact bytes through the same port without transmitting unsolicited loopback packets
-- **ThorSerial Reply** uses the baud rate and serial format configured for its RS232 row. It displays every raw received byte in the RX monitor, waits for ThorSerialV2's exact raw 16-byte frame (`55 AA 00 FF 13 37 42 7E 81 18 24 C3 3C 5A A5 E7`), and sends one complete echo only for a valid frame; no CRLF is added
+- **ThorSerial Reply** uses the baud rate and serial format configured for its RS232 row. It displays every raw received byte in the RX monitor, waits for ThorSerialV2's exact raw 16-byte frame (`55 AA 00 FF 13 37 42 7E 81 18 24 C3 3C 5A A5 E7`), and immediately sends one complete echo only for a valid frame; no CRLF or deliberate turnaround delay is added
 - Message mismatches are ignored for the first 2 seconds after communication starts on every channel; port-open and serial I/O errors remain visible
 - Customizable RS232 and RS485 counts from Settings (defaults: 40 and 8) (MAX: 256 and 128)
 - Combined Overview page for all ports/channels with color status bars and row outlines
@@ -284,7 +284,7 @@ The UPort installer also applies the bundled modern-kernel compatibility patch a
 2. Configure RS232 ports and names.
    - Set **Role** to **Loopback Test** for normal testing.
    - Set **Role** to **RS485 Reply** for a passive port that sends nothing by itself and echoes only bytes it receives.
-   - Set **Role** to **ThorSerial Reply** for a passive port that uses that RS232 row's selected baud rate/framing and replies only to ThorSerialV2's complete 16-byte test frame. Use `9600 8N1` and select **485 PC REPLY** on the updated ThorSerialV2 firmware.
+   - Set **Role** to **ThorSerial Reply** for a passive port that uses that RS232 row's selected baud rate/framing and replies only to ThorSerialV2's complete 16-byte test frame. Use `9600 8N1`; no ThorSerial firmware modification is required by this PC reply role.
    - Set **Role** to **PARO Simulator** to make that port behave like a PARO sensor.
    - Set a **PARO Device ID** from `00` to `99` for each simulated sensor. The PARO/Arduino default serial format is `9600 8N1`.
 3. Configure each RS485 port and name. Assign at least one connected RS232 channel the **RS485 Reply** role for the return path.
