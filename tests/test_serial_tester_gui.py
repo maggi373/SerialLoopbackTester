@@ -98,6 +98,10 @@ class ScriptedPort:
     def flush(self):
         pass
 
+    @property
+    def in_waiting(self):
+        return len(self.reads[0]) if self.reads else 0
+
     def read(self, _length):
         return self.reads.pop(0) if self.reads else b""
 
@@ -112,7 +116,7 @@ class StopAfterRs232EchoWorker(app_module.RS232Worker):
 
     def emit(self, status, last, **kwargs):
         super().emit(status, last, **kwargs)
-        if last.startswith("RS485 reply RX/TX"):
+        if last.startswith("RS485 Reply on"):
             self.stop_event.set()
 
 
@@ -178,6 +182,29 @@ class FailToOpenWorker(app_module.RS232Worker):
 
 
 class SerialTesterTests(unittest.TestCase):
+    def test_serial_format_match_checks_every_framing_setting(self):
+        first = app_module.default_rs232_item(0)
+        second = app_module.default_rs485_item(0)
+        self.assertTrue(app_module.serial_formats_match(first, second))
+
+        second["baudrate"] *= 2
+        self.assertFalse(app_module.serial_formats_match(first, second))
+
+    def test_shared_rs485_format_is_available_only_when_enabled_requests_agree(self):
+        first = app_module.default_rs485_item(0)
+        second = app_module.default_rs485_item(1)
+        first["sender_port"] = "/dev/ttyUSB0"
+        second["sender_port"] = "/dev/ttyUSB1"
+
+        shared = app_module.shared_serial_format([first, second])
+
+        self.assertEqual(
+            shared,
+            {"baudrate": 19200, "bytesize": 8, "parity": "N", "stopbits": 1.0},
+        )
+        second["baudrate"] = 9600
+        self.assertIsNone(app_module.shared_serial_format([first, second]))
+
     def test_port_normalization_preserves_case_sensitive_linux_device_paths(self):
         self.assertEqual(app_module.normalize_port_text("/dev/ttyUSB0"), "/dev/ttyUSB0")
         self.assertEqual(app_module.normalize_port_text("/dev/serial/by-id/MyAdapter"), "/dev/serial/by-id/MyAdapter")
@@ -485,8 +512,22 @@ class SerialTesterTests(unittest.TestCase):
         worker.run()
 
         self.assertEqual(port.writes, [rs485_payload])
-        self.assertTrue(any(event["last"].startswith("RS485 reply RX/TX") for event in events.queue))
+        reply_event = next(event for event in events.queue if event["last"].startswith("RS485 Reply on"))
+        self.assertIn(config["port"], reply_event["last"])
+        self.assertIn(f"received RX {rs485_payload.hex(' ').upper()}", reply_event["last"])
+        self.assertIn(f"echoed TX {rs485_payload.hex(' ').upper()}", reply_event["last"])
         self.assertEqual(sum(event["fail_inc"] for event in events.queue), 0)
+
+    def test_rs485_reply_collects_split_request_before_transmitting(self):
+        events = queue.Queue()
+        config = app_module.default_rs232_item(0)
+        config["mode"] = app_module.RS232_MODE_RS485_REPLY
+        port = ScriptedPort([bytes.fromhex("A55A"), bytes.fromhex("A55A")])
+        worker = StopAfterRs232EchoWorker(0, config, events, worker_id=10, port=port)
+
+        worker.run()
+
+        self.assertEqual(port.writes, [bytes.fromhex("A55AA55A")])
 
     def test_loopback_role_does_not_echo_unexpected_bytes(self):
         events = queue.Queue()

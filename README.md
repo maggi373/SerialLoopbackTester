@@ -7,7 +7,7 @@ Python GUI tool for:
 - Per-port RS232 roles: normal loopback testing, passive RS485 reply, or a stateful PARO/Digiquartz sensor simulator
 - PARO ports support addressed commands, independent device IDs, measurement ramps, configuration reads/writes, errors, held/continuous readings, and output masks based on the Arduino `parosim` implementation
 - 8 RS485 tests (RS485 sends -> an RS232 port in **RS485 Reply** role echoes the received bytes -> RS485 verifies the response)
-- RS485 reply routing is port-agnostic; any RS232 channel assigned the dedicated reply role can answer, without transmitting its own loopback packets
+- RS485 reply routing is port-agnostic; any RS232 channel assigned the dedicated reply role is opened with the shared baud/framing settings of the enabled RS485 request rows, listens for a complete incoming byte burst, waits for the line to become idle, and echoes those exact bytes through the same port without transmitting unsolicited loopback packets
 - Message mismatches are ignored for the first 2 seconds after communication starts on every channel; port-open and serial I/O errors remain visible
 - Customizable RS232 and RS485 counts from Settings (defaults: 40 and 8) (MAX: 256 and 128)
 - Combined Overview page for all ports/channels with color status bars and row outlines

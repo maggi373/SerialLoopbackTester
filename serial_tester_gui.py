@@ -53,6 +53,8 @@ MIN_INTERVAL_MS = 25
 DEFAULT_PACKET_SIZE_BYTES = 8
 MIN_PACKET_SIZE_BYTES = 1
 MAX_PACKET_SIZE_BYTES = 4096
+RS485_REPLY_MIN_QUIET_S = 0.002
+RS485_REPLY_MIN_TURNAROUND_S = 0.002
 RS232_PAYLOAD_PATTERN_HEX = "55AA"
 RS485_PAYLOAD_PATTERN_HEX = "A55A"
 DEFAULT_RS232_PAYLOAD_HEX = "55AA55AA55AA55AA"
@@ -913,6 +915,35 @@ def serial_error_detail(exc: BaseException) -> str:
     return detail or exc.__class__.__name__
 
 
+def serial_format_text(config: dict) -> str:
+    stopbits = stopbits_to_text(config.get("stopbits", 1))
+    return (
+        f"{int(config['baudrate'])} baud, {int(config['bytesize'])} data bits, "
+        f"parity {str(config['parity']).upper()}, {stopbits} stop bit{'s' if stopbits != '1' else ''}"
+    )
+
+
+def serial_formats_match(first: dict, second: dict) -> bool:
+    return (
+        int(first["baudrate"]) == int(second["baudrate"])
+        and int(first["bytesize"]) == int(second["bytesize"])
+        and str(first["parity"]).upper() == str(second["parity"]).upper()
+        and float(first["stopbits"]) == float(second["stopbits"])
+    )
+
+
+def shared_serial_format(configs: list[dict]) -> dict | None:
+    enabled = [item for item in configs if item.get("enabled") and str(item.get("sender_port", "")).strip()]
+    if not enabled or any(not serial_formats_match(enabled[0], item) for item in enabled[1:]):
+        return None
+    return {
+        "baudrate": int(enabled[0]["baudrate"]),
+        "bytesize": int(enabled[0]["bytesize"]),
+        "parity": str(enabled[0]["parity"]).upper(),
+        "stopbits": float(enabled[0]["stopbits"]),
+    }
+
+
 class RS232Worker(threading.Thread):
     def __init__(self, index: int, config: dict, event_queue: queue.Queue, worker_id: int = 0):
         super().__init__(daemon=True)
@@ -998,18 +1029,72 @@ class RS232Worker(threading.Thread):
                 self.emit("Running", f"PARO baud changed to {pending_baud}", log=True)
 
     def run_rs485_reply(self, port: serial.Serial) -> None:
-        """Passively echo received bytes without transmitting unsolicited data."""
+        """Collect each received burst and echo it after the line becomes idle."""
+        baudrate = max(int(self.config["baudrate"]), 1)
+        bytesize = int(self.config["bytesize"])
+        parity_bits = 0 if str(self.config["parity"]).upper() == "N" else 1
+        bits_per_character = 1.0 + bytesize + parity_bits + float(self.config["stopbits"])
+        character_time_s = bits_per_character / baudrate
+        quiet_period_s = max(character_time_s * 2.0, RS485_REPLY_MIN_QUIET_S)
+        turnaround_s = max(character_time_s, RS485_REPLY_MIN_TURNAROUND_S)
+        port_name = str(self.config["port"])
+        serial_format = serial_format_text(self.config)
+        last_wait_report_at = 0.0
+        received_total = 0
+
         while not self.stop_event.is_set():
             waiting = max(int(getattr(port, "in_waiting", 0)), 0)
-            received = port.read(max(1, waiting))
-            if not received:
+            first_chunk = port.read(max(1, min(waiting, MAX_PACKET_SIZE_BYTES)))
+            if not first_chunk:
+                now = time.monotonic()
+                if now - last_wait_report_at >= 1.0:
+                    target_hint = str(self.config.get("rs485_reply_target_hint", "")).strip()
+                    hint_suffix = f" {target_hint}" if target_hint else ""
+                    self.emit(
+                        "Running",
+                        f"RS485 Reply waiting on {port_name} at {serial_format}: RX 0 bytes; "
+                        f"nothing has arrived to echo.{hint_suffix}",
+                    )
+                    last_wait_report_at = now
                 continue
-            written = port.write(received)
+
+            received = bytearray(first_chunk)
+            quiet_deadline = time.monotonic() + quiet_period_s
+            while len(received) < MAX_PACKET_SIZE_BYTES and not self.stop_event.is_set():
+                waiting = max(int(getattr(port, "in_waiting", 0)), 0)
+                if waiting:
+                    chunk = port.read(min(waiting, MAX_PACKET_SIZE_BYTES - len(received)))
+                    if chunk:
+                        received.extend(chunk)
+                        quiet_deadline = time.monotonic() + quiet_period_s
+                        continue
+
+                remaining_s = quiet_deadline - time.monotonic()
+                if remaining_s <= 0:
+                    break
+                self.stop_event.wait(min(remaining_s, 0.001))
+
+            if self.stop_event.is_set():
+                break
+            if self.stop_event.wait(turnaround_s):
+                break
+
+            reply = bytes(received)
+            received_total += len(reply)
+            written = port.write(reply)
             port.flush()
-            if written != len(received):
-                raise SerialException(f"only echoed {written} of {len(received)} byte(s)")
-            received_hex = received.hex(" ").upper()
-            self.emit("PASS", f"RS485 reply RX/TX {received_hex}", pass_inc=1)
+            if written != len(reply):
+                raise SerialException(
+                    f"RS485 Reply on {port_name} wrote only {written} of {len(reply)} received byte(s)"
+                )
+            reply_hex = reply.hex(" ").upper()
+            self.emit(
+                "PASS",
+                f"RS485 Reply on {port_name}: received RX {reply_hex} ({len(reply)} bytes); "
+                f"echoed TX {reply_hex} ({written} bytes) on the same port; "
+                f"total RX {received_total} bytes",
+                pass_inc=1,
+            )
 
     def run(self) -> None:
         payload = bytes.fromhex(self.config["payload_hex"])
@@ -1048,7 +1133,14 @@ class RS232Worker(threading.Thread):
                         device_id = int(self.config.get("paro_device_id", DEFAULT_PARO_DEVICE_ID))
                         self.emit("Running", f"PARO simulator open: {port_name}, ID {device_id:02d}", log=True)
                     elif self.config.get("mode") == RS232_MODE_RS485_REPLY:
-                        self.emit("Running", f"RS485 reply open: {port_name} (passive)", log=True)
+                        target_hint = str(self.config.get("rs485_reply_target_hint", "")).strip()
+                        hint_suffix = f" {target_hint}" if target_hint else ""
+                        self.emit(
+                            "Running",
+                            f"RS485 Reply listening on {port_name} at {serial_format_text(self.config)}; "
+                            f"each complete received burst is echoed back through this same port.{hint_suffix}",
+                            log=True,
+                        )
                     else:
                         self.emit("Running", f"Port open: {port_name}", log=True)
                     if startup_delay_s > 0:
@@ -1203,7 +1295,12 @@ class RS485PairWorker(threading.Thread):
                 with sender:
                     with self.port_lock:
                         self.active_ports = (sender,)
-                    self.emit("Running", f"Port open: {port_name}", log=True)
+                    self.emit(
+                        "Running",
+                        f"RS485 request port open: {port_name}; sends a request and waits for its echoed "
+                        "reply on the same port",
+                        log=True,
+                    )
                     if startup_delay_s > 0:
                         self.emit("Standby", f"Startup delay {startup_delay_s:.1f}s")
                         if self.stop_event.wait(startup_delay_s):
@@ -1225,18 +1322,24 @@ class RS485PairWorker(threading.Thread):
                         if self.stop_event.is_set():
                             break
                         if written == len(payload) and bounced == payload:
-                            self.emit("PASS", f"TX/RX {payload_hex}", pass_inc=1)
+                            self.emit(
+                                "PASS",
+                                f"Request TX {payload_hex}; echoed reply RX {payload_hex}",
+                                pass_inc=1,
+                            )
                         else:
                             bounced_hex = bounced.hex(" ").upper() if bounced else "<none>"
                             if time.monotonic() < failure_grace_deadline:
                                 self.emit(
                                     "Running",
-                                    f"Grace period: RX {bounced_hex}, expected {payload_hex} (failure ignored)",
+                                    f"Grace period: request TX {payload_hex}; reply RX {bounced_hex} "
+                                    f"(expected echoed {payload_hex}, failure ignored)",
                                 )
                             else:
                                 self.emit(
                                     "FAIL",
-                                    f"RX {bounced_hex}, expected {payload_hex}",
+                                    f"Request TX {payload_hex}; reply RX {bounced_hex}; "
+                                    f"expected echoed {payload_hex}",
                                     fail_inc=1,
                                     log=True,
                                 )
@@ -3065,6 +3168,17 @@ class SerialTesterApp(tk.Tk):
         row += 1
         self._labeled_combobox(editor, "Role", self.rs232_var_mode, RS232_MODE_OPTIONS, row)
         row += 1
+        ttk.Label(
+            editor,
+            text=(
+                "RS485 Reply role: this port sends nothing by itself. It listens for any incoming byte burst, "
+                "waits until the burst is complete, then echoes the exact bytes back through this same port. "
+                "It is not assigned to a specific RS485 row; the physical wiring determines which request it answers."
+            ),
+            wraplength=430,
+            justify=tk.LEFT,
+        ).grid(row=row, column=0, columnspan=2, sticky="ew", pady=(2, 6))
+        row += 1
         self._labeled_entry(editor, "PARO Device ID (00-99)", self.rs232_var_paro_id, row)
         row += 1
         self._labeled_entry(editor, "Baudrate", self.rs232_var_baud, row)
@@ -3974,6 +4088,40 @@ class SerialTesterApp(tk.Tk):
                 worker_cfg["linux_moxa_mode"] = self.linux_moxa_modes.get(
                     normalize_port_text(cfg.get("port")), ""
                 )
+                if cfg.get("mode") == RS232_MODE_RS485_REPLY:
+                    enabled_requests = [
+                        item
+                        for item in self.rs485_configs
+                        if item.get("enabled") and str(item.get("sender_port", "")).strip()
+                    ]
+                    request_format = shared_serial_format(self.rs485_configs)
+                    if request_format is not None:
+                        worker_cfg.update(request_format)
+                    matching_requests = [
+                        item for item in enabled_requests if serial_formats_match(worker_cfg, item)
+                    ]
+                    if matching_requests:
+                        matched_names = ", ".join(
+                            f"{item['name']} ({item['sender_port']})" for item in matching_requests
+                        )
+                        worker_cfg["rs485_reply_target_hint"] = (
+                            f"Reply port opened using the shared RS485 request format "
+                            f"({serial_format_text(worker_cfg)}). Matching request rows: {matched_names}. "
+                            "Physical wiring determines which request reaches this reply port."
+                        )
+                    elif enabled_requests:
+                        request_formats = "; ".join(
+                            f"{item['name']} ({item['sender_port']}): {serial_format_text(item)}"
+                            for item in enabled_requests[:3]
+                        )
+                        worker_cfg["rs485_reply_target_hint"] = (
+                            "WARNING: this reply port's serial format does not match any enabled RS485 request. "
+                            f"Enabled request formats: {request_formats}."
+                        )
+                    else:
+                        worker_cfg["rs485_reply_target_hint"] = (
+                            "No enabled RS485 request row is currently configured."
+                        )
                 worker_id = self.next_worker_id
                 self.next_worker_id += 1
                 worker = RS232Worker(idx, worker_cfg, self.event_queue, worker_id=worker_id)
