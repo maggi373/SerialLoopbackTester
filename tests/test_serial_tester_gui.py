@@ -520,6 +520,46 @@ class SerialTesterTests(unittest.TestCase):
         self.assertEqual(config["mode"], app_module.RS232_MODE_THORSERIAL_REPLY)
         self.assertEqual(app_module.rs232_mode_label(config["mode"]), "ThorSerial Reply")
 
+    def test_thorserial_reply_worker_uses_selected_serial_format(self):
+        app = object.__new__(app_module.SerialTesterApp)
+        config = app_module.default_rs232_item(0)
+        config.update(
+            {
+                "port": "COM7",
+                "mode": app_module.RS232_MODE_THORSERIAL_REPLY,
+                "baudrate": 38400,
+                "bytesize": 7,
+                "parity": "E",
+                "stopbits": 2.0,
+            }
+        )
+        app.rs232_configs = [config]
+        app.rs232_state = [app_module.SerialTesterApp.new_state()]
+        app.rs232_workers = {}
+        app.linux_moxa_modes = {}
+        app.event_queue = queue.Queue()
+        app.next_worker_id = 1
+        app.refresh_rs232_row = lambda *_args, **_kwargs: None
+        app.append_log = lambda _message: None
+        captured_configs = []
+
+        class CapturingWorker:
+            def __init__(self, _idx, worker_config, _events, worker_id):
+                captured_configs.append(worker_config)
+                self.worker_id = worker_id
+
+            def start(self):
+                pass
+
+        with patch.object(app_module, "RS232Worker", CapturingWorker):
+            app_module.SerialTesterApp.start_single_test(app, "rs232", 0, startup_delay_s=0.0)
+
+        worker_config = captured_configs[0]
+        self.assertEqual(worker_config["baudrate"], 38400)
+        self.assertEqual(worker_config["bytesize"], 7)
+        self.assertEqual(worker_config["parity"], "E")
+        self.assertEqual(worker_config["stopbits"], 2.0)
+
     def test_rs485_reply_role_is_passive_and_echoes_whatever_it_receives(self):
         events = queue.Queue()
         config = app_module.default_rs232_item(0)

@@ -62,7 +62,6 @@ DEFAULT_RS485_PAYLOAD_HEX = "A55AA55AA55AA55A"
 THOR_SERIAL_V2_RS485_PAYLOAD = bytes.fromhex(
     "55 AA 00 FF 13 37 42 7E 81 18 24 C3 3C 5A A5 E7"
 )
-THOR_SERIAL_V2_BAUDRATE = 9600
 PARITY_OPTIONS = ("N", "E", "O", "M", "S")
 BYTESIZE_OPTIONS = ("5", "6", "7", "8")
 STOPBITS_OPTIONS = ("1", "1.5", "2")
@@ -1166,6 +1165,7 @@ class RS232Worker(threading.Thread):
         frame = THOR_SERIAL_V2_RS485_PAYLOAD
         frame_hex = frame.hex(" ").upper()
         port_name = str(self.config["port"])
+        serial_format = serial_format_text(self.config)
         candidate = bytearray()
         raw_window = bytearray()
         last_wait_report_at = 0.0
@@ -1181,7 +1181,8 @@ class RS232Worker(threading.Thread):
                     raw_suffix = f"; last raw RX {last_raw_hex}" if last_raw_hex else ""
                     self.emit(
                         "Running",
-                        f"ThorSerial Reply waiting on {port_name}: no new bytes{raw_suffix}; "
+                        f"ThorSerial Reply waiting on {port_name} at {serial_format}: "
+                        f"no new bytes{raw_suffix}; "
                         f"expecting {frame_hex} (16 bytes, no CRLF)",
                     )
                     last_wait_report_at = now
@@ -1292,7 +1293,7 @@ class RS232Worker(threading.Thread):
                     elif self.config.get("mode") == RS232_MODE_THORSERIAL_REPLY:
                         self.emit(
                             "Running",
-                            f"ThorSerial Reply listening on {port_name} at 9600 baud, 8N1; "
+                            f"ThorSerial Reply listening on {port_name} at {serial_format_text(self.config)}; "
                             "waits for the exact 16-byte ThorSerialV2 frame and echoes it once with no CRLF.",
                             log=True,
                         )
@@ -3389,8 +3390,9 @@ class SerialTesterApp(tk.Tk):
             text=(
                 "RS485 Reply role: this port sends nothing by itself. It listens for any incoming byte burst, "
                 "waits for the complete configured RS485 request, then echoes the exact bytes through this same port. "
-                "ThorSerial Reply is a dedicated 9600 8N1 mode that only echoes ThorSerialV2's exact 16-byte "
-                "binary test frame; neither reply mode adds CRLF. Physical wiring determines which request arrives."
+                "ThorSerial Reply uses the baudrate and serial format selected below and only echoes "
+                "ThorSerialV2's exact 16-byte binary test frame; neither reply mode adds CRLF. "
+                "Physical wiring determines which request arrives."
             ),
             wraplength=430,
             justify=tk.LEFT,
@@ -4348,15 +4350,6 @@ class SerialTesterApp(tk.Tk):
                         worker_cfg["rs485_reply_target_hint"] = (
                             "No enabled RS485 request row is currently configured."
                         )
-                elif cfg.get("mode") == RS232_MODE_THORSERIAL_REPLY:
-                    worker_cfg.update(
-                        {
-                            "baudrate": THOR_SERIAL_V2_BAUDRATE,
-                            "bytesize": 8,
-                            "parity": "N",
-                            "stopbits": 1.0,
-                        }
-                    )
                 worker_id = self.next_worker_id
                 self.next_worker_id += 1
                 worker = RS232Worker(idx, worker_cfg, self.event_queue, worker_id=worker_id)
