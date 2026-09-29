@@ -336,6 +336,12 @@ def open_serial_endpoint(
             apply_moxa_uport_mode(
                 endpoint,
                 linux_moxa_mode,
+                baudrate=baudrate,
+                bytesize=bytesize,
+                parity=parity,
+                stopbits=stopbits,
+                xonxoff=bool(getattr(opened, "xonxoff", False)),
+                rtscts=bool(getattr(opened, "rtscts", False)),
             )
             # SET_CONFIG asserts both modem-control lines. Ask pyserial to
             # restore the states selected for this open port.
@@ -3295,7 +3301,16 @@ class SerialTesterApp(tk.Tk):
         mode_code = LINUX_SETSERIAL_MODE_CODES.get(mode, 0)
         remembered = self.linux_moxa_modes.get(device)
         remembered_text = f"  [remembered: {remembered}]" if remembered else ""
-        helper_command = f"./set_moxa_uport_mode.sh {device} {mode}"
+        settings, _active_port = self._moxa_serial_settings_for_device(device)
+        helper_command = (
+            f"./set_moxa_uport_mode.sh {device} {mode} "
+            f"--baudrate {settings['baudrate']} --bytesize {settings['bytesize']} "
+            f"--parity {settings['parity']} --stopbits {settings['stopbits']:g}"
+        )
+        if settings["xonxoff"]:
+            helper_command += " --xonxoff"
+        if settings["rtscts"]:
+            helper_command += " --rtscts"
         self.linux_setserial_command_var.set(
             f"{helper_command}\n"
             f"setserial {device} port {mode_code}{remembered_text}"
@@ -3316,6 +3331,41 @@ class SerialTesterApp(tk.Tk):
                     return worker.active_ports[0]
         return None
 
+    def _moxa_serial_settings_for_device(self, device: str) -> tuple[dict, object | None]:
+        active_port = self._active_serial_for_device(device)
+        if active_port is not None:
+            return {
+                "baudrate": int(active_port.baudrate),
+                "bytesize": int(active_port.bytesize),
+                "parity": str(active_port.parity).upper(),
+                "stopbits": float(active_port.stopbits),
+                "xonxoff": bool(getattr(active_port, "xonxoff", False)),
+                "rtscts": bool(getattr(active_port, "rtscts", False)),
+            }, active_port
+
+        for cfg, key in (
+            *((item, "port") for item in self.rs232_configs),
+            *((item, "sender_port") for item in self.rs485_configs),
+        ):
+            if normalize_port_text(cfg.get(key)) == device:
+                return {
+                    "baudrate": int(cfg["baudrate"]),
+                    "bytesize": int(cfg["bytesize"]),
+                    "parity": str(cfg["parity"]).upper(),
+                    "stopbits": float(cfg["stopbits"]),
+                    "xonxoff": False,
+                    "rtscts": False,
+                }, None
+
+        return {
+            "baudrate": max(as_int(self.global_baudrate_var.get(), DEFAULT_BAUDRATE), 1),
+            "bytesize": 8,
+            "parity": "N",
+            "stopbits": 1.0,
+            "xonxoff": False,
+            "rtscts": False,
+        }, None
+
     def apply_linux_moxa_from_panel(self) -> None:
         device = normalize_port_text(self.linux_setserial_device_var.get())
         mode = normalize_linux_setserial_mode(self.linux_setserial_mode_var.get())
@@ -3326,9 +3376,9 @@ class SerialTesterApp(tk.Tk):
             messagebox.showerror("Select mode", "Select one of the four interface modes.")
             return
 
-        active_port = self._active_serial_for_device(device)
+        settings, active_port = self._moxa_serial_settings_for_device(device)
         try:
-            moxa_device = apply_moxa_uport_mode(device, mode)
+            moxa_device = apply_moxa_uport_mode(device, mode, **settings)
             if active_port is not None:
                 for signal_name in ("dtr", "rts"):
                     if hasattr(active_port, signal_name):

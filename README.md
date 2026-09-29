@@ -130,7 +130,7 @@ getent group dialout
 
 The `usermod` command above adds the currently logged-in Fedora user to `dialout`; do not replace `$USER` with `root`. Log out of the desktop completely and back in, then verify with `id -nG` before starting the application. Using `/dev/serial/by-id/...` in the application is recommended because `/dev/ttyUSBn` numbers can change after reconnecting devices.
 
-The Linux build provides a **Linux Serial Mode** tab. For a Moxa UPort 1150/1150I, select the local `/dev/...` device and interface mode, then click **Apply with built-in Moxa helper**. This uses Linux's in-kernel `ti_usb_3410_5052` driver and a userspace USB control request, so Moxa's out-of-tree kernel module, kernel headers, and `setserial` are not required. The helper reads the active UART configuration and changes only its interface-mode byte, preserving the baud rate, data bits, parity, stop bits, and flow-control settings established by the serial driver. A mode applied this way is saved for that device path and reapplied immediately after this application opens it because the stock driver resets the adapter to RS-232 during open/configuration.
+The Linux build provides a **Linux Serial Mode** tab. For a Moxa UPort 1150/1150I, select the local `/dev/...` device and interface mode, then click **Apply with built-in Moxa helper**. This uses Linux's in-kernel `ti_usb_3410_5052` driver and a userspace USB control request, so Moxa's out-of-tree kernel module, kernel headers, and `setserial` are not required. The helper builds the same UART configuration packet as Moxa's driver, including the selected interface mode and the active serial settings. A mode applied this way is saved for that device path and reapplied immediately after this application opens it because the stock driver resets the adapter to RS-232 during open/configuration.
 
 The legacy **Apply with setserial** button remains available for systems already using Moxa's driver. The mode mapping is:
 
@@ -144,7 +144,7 @@ Run `./install_serial_access.sh` once, reconnect the adapter, and log out/in to 
 For manual verification outside the GUI, apply the same userspace command after the TTY has been opened/configured:
 
 ```bash
-./set_moxa_uport_mode.sh /dev/ttyUSB0 rs485-2w
+./set_moxa_uport_mode.sh /dev/ttyUSB0 rs485-2w --baudrate 19200 --bytesize 8 --parity N --stopbits 1
 ```
 
 Supported modes are `rs232`, `rs485-2w`, `rs422`, and `rs485-4w`. Opening the TTY or changing its baud/parity afterward makes the stock kernel driver send its RS-232 configuration again, so rerun the script after that operation. The GUI handles this reapplication for modes explicitly remembered from its Linux Serial Mode panel.
@@ -252,7 +252,7 @@ Linux's in-kernel `ti_usb_3410_5052` driver recognizes the UPort 1150 and isolat
 ```bash
 ./install_serial_access.sh
 # Reconnect/log in again, open the port in the application, then for manual verification:
-./set_moxa_uport_mode.sh /dev/ttyUSB0 rs485-2w
+./set_moxa_uport_mode.sh /dev/ttyUSB0 rs485-2w --baudrate 19200
 ```
 
 The older Moxa-module route is retained only as a compatibility fallback. Its bundled wrapper compiles Moxa's Linux 6.x driver with RS-485 two-wire as the default:

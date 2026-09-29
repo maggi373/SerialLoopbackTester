@@ -47,13 +47,10 @@ MODE_LABELS = {
     "rs485-4w": "RS-485 four-wire",
 }
 
-TI_GET_CONFIG = 0x04
 TI_SET_CONFIG = 0x05
 TI_UART1_PORT = 0x03
 USB_VENDOR_DEVICE_OUT = 0x40
-USB_VENDOR_DEVICE_IN = 0xC0
 USB_CONTROL_TIMEOUT_MS = 1000
-UART_CONFIG_SIZE = struct.calcsize(">HHBBBBBB")
 
 UART_ENABLE_RTS_IN = 0x0001
 UART_ENABLE_PARITY_CHECKING = 0x0008
@@ -201,8 +198,10 @@ def build_uart_config(
     if xonxoff:
         flags |= UART_ENABLE_X_IN | UART_ENABLE_X_OUT
 
-    # This exactly matches struct ti_uart_config in ti_usb_3410_5052.
-    divisor = (923077 + baud // 2) // baud
+    # Match Moxa's mxu11x0 driver exactly. In particular, it truncates the
+    # divisor and leaves XON/XOFF bytes zero unless software flow control is
+    # enabled.
+    divisor = 923077 // baud
     return struct.pack(
         ">HHBBBBBB",
         divisor,
@@ -210,22 +209,10 @@ def build_uart_config(
         data_bits - 5,
         parity_codes[parity_name],
         stop_code,
-        0x11,
-        0x13,
+        0x11 if xonxoff else 0,
+        0x13 if xonxoff else 0,
         MODE_CODES[normalized_mode],
     )
-
-
-def build_mode_config(active_config: bytes, mode: object) -> bytes:
-    """Return an active UART config with only its electrical mode changed."""
-    if len(active_config) != UART_CONFIG_SIZE:
-        raise ValueError(
-            f"Expected a {UART_CONFIG_SIZE}-byte TI UART config, got {len(active_config)} bytes."
-        )
-
-    payload = bytearray(active_config)
-    payload[-1] = MODE_CODES[normalize_mode(mode)]
-    return bytes(payload)
 
 
 def _iowr(type_number: int, command_number: int, size: int) -> int:
@@ -238,26 +225,15 @@ USBDEVFS_CONTROL = _iowr(ord("U"), 0, ctypes.sizeof(UsbdevfsCtrlTransfer))
 
 def _usb_control_transfer(
     usb_path: Path,
-    *,
-    request_type: int,
-    request: int,
-    payload: bytes | None = None,
-    response_size: int = 0,
-) -> bytes:
-    if payload is not None and response_size:
-        raise ValueError("A USB control transfer cannot send and receive payload data simultaneously.")
-
-    transfer_size = len(payload) if payload is not None else response_size
-    if payload is None:
-        buffer = (ctypes.c_ubyte * transfer_size)()
-    else:
-        buffer = (ctypes.c_ubyte * transfer_size).from_buffer_copy(payload)
+    payload: bytes,
+) -> None:
+    buffer = (ctypes.c_ubyte * len(payload)).from_buffer_copy(payload)
     transfer = UsbdevfsCtrlTransfer(
-        bRequestType=request_type,
-        bRequest=request,
+        bRequestType=USB_VENDOR_DEVICE_OUT,
+        bRequest=TI_SET_CONFIG,
         wValue=0,
         wIndex=TI_UART1_PORT,
-        wLength=transfer_size,
+        wLength=len(payload),
         timeout=USB_CONTROL_TIMEOUT_MS,
         data=ctypes.cast(buffer, ctypes.c_void_p),
     )
@@ -286,12 +262,10 @@ def _usb_control_transfer(
                     str(usb_path),
                 )
             raise OSError(error_number, os.strerror(error_number), str(usb_path))
-        if result != transfer_size:
+        if result != len(payload):
             raise OSError(
-                f"Moxa USB request 0x{request:02X} transferred {result} of {transfer_size} bytes "
-                f"through {usb_path}."
+                f"Moxa SET_CONFIG transferred {result} of {len(payload)} bytes through {usb_path}."
             )
-        return bytes(buffer)
     finally:
         os.close(descriptor)
 
@@ -299,21 +273,25 @@ def _usb_control_transfer(
 def apply_moxa_uport_mode(
     tty_path: object,
     mode: object,
+    *,
+    baudrate: int,
+    bytesize: int,
+    parity: str,
+    stopbits: float,
+    xonxoff: bool = False,
+    rtscts: bool = False,
 ) -> MoxaUsbDevice:
     device = find_moxa_uport(tty_path)
-    active_config = _usb_control_transfer(
-        device.usb_path,
-        request_type=USB_VENDOR_DEVICE_IN,
-        request=TI_GET_CONFIG,
-        response_size=UART_CONFIG_SIZE,
+    payload = build_uart_config(
+        mode,
+        baudrate=baudrate,
+        bytesize=bytesize,
+        parity=parity,
+        stopbits=stopbits,
+        xonxoff=xonxoff,
+        rtscts=rtscts,
     )
-    payload = build_mode_config(active_config, mode)
-    _usb_control_transfer(
-        device.usb_path,
-        request_type=USB_VENDOR_DEVICE_OUT,
-        request=TI_SET_CONFIG,
-        payload=payload,
-    )
+    _usb_control_transfer(device.usb_path, payload)
     return device
 
 
@@ -330,6 +308,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
         metavar="MODE",
         help="rs232, rs485-2w, rs422, or rs485-4w (numeric aliases 0..3 are also accepted)",
     )
+    parser.add_argument("--baudrate", type=int, default=19200)
+    parser.add_argument("--bytesize", type=int, choices=(5, 6, 7, 8), default=8)
+    parser.add_argument("--parity", choices=("N", "E", "O", "M", "S", "n", "e", "o", "m", "s"), default="N")
+    parser.add_argument("--stopbits", type=float, choices=(1.0, 1.5, 2.0), default=1.0)
+    parser.add_argument("--xonxoff", action="store_true")
+    parser.add_argument("--rtscts", action="store_true")
     return parser
 
 
@@ -339,6 +323,12 @@ def main(argv: list[str] | None = None) -> int:
         device = apply_moxa_uport_mode(
             args.device,
             args.mode,
+            baudrate=args.baudrate,
+            bytesize=args.bytesize,
+            parity=args.parity,
+            stopbits=args.stopbits,
+            xonxoff=args.xonxoff,
+            rtscts=args.rtscts,
         )
     except (OSError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
