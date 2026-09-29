@@ -122,7 +122,7 @@ class StopAfterRs232EchoWorker(app_module.RS232Worker):
 
     def emit(self, status, last, **kwargs):
         super().emit(status, last, **kwargs)
-        if last.startswith("RS485 Reply on"):
+        if last.startswith(("RS485 Reply on", "ThorSerial Reply on")):
             self.stop_event.set()
 
 
@@ -507,6 +507,12 @@ class SerialTesterTests(unittest.TestCase):
         self.assertEqual(config["mode"], app_module.RS232_MODE_RS485_REPLY)
         self.assertEqual(app_module.rs232_mode_label(config["mode"]), "RS485 Reply")
 
+    def test_thorserial_reply_assignment_is_normalized_and_persisted(self):
+        config = app_module.normalize_rs232({"mode": "thorserial_reply"}, 0)
+
+        self.assertEqual(config["mode"], app_module.RS232_MODE_THORSERIAL_REPLY)
+        self.assertEqual(app_module.rs232_mode_label(config["mode"]), "ThorSerial Reply")
+
     def test_rs485_reply_role_is_passive_and_echoes_whatever_it_receives(self):
         events = queue.Queue()
         config = app_module.default_rs232_item(0)
@@ -537,10 +543,25 @@ class SerialTesterTests(unittest.TestCase):
 
         self.assertEqual(port.writes, [bytes.fromhex("A55AA55A")])
 
-    def test_rs485_reply_collects_complete_thor_frame_when_driver_reports_one_byte_at_a_time(self):
+    def test_rs485_reply_collects_configured_request_when_driver_reports_one_byte_at_a_time(self):
         events = queue.Queue()
         config = app_module.default_rs232_item(0)
         config["mode"] = app_module.RS232_MODE_RS485_REPLY
+        payload = bytes.fromhex(app_module.DEFAULT_RS485_PAYLOAD_HEX)
+        config["rs485_reply_expected_payloads"] = (payload.hex(),)
+        port = OneByteAtATimePort([bytes((value,)) for value in payload])
+        worker = StopAfterRs232EchoWorker(0, config, events, worker_id=12, port=port)
+
+        worker.run()
+
+        self.assertEqual(port.writes, [payload])
+        reply_event = next(event for event in events.queue if event["last"].startswith("RS485 Reply on"))
+        self.assertIn("complete configured RS485 request", reply_event["last"])
+
+    def test_rs485_reply_collects_complete_thor_frame_when_driver_reports_one_byte_at_a_time(self):
+        events = queue.Queue()
+        config = app_module.default_rs232_item(0)
+        config["mode"] = app_module.RS232_MODE_THORSERIAL_REPLY
         thor_frame = app_module.THOR_SERIAL_V2_RS485_PAYLOAD
         port = OneByteAtATimePort([bytes((value,)) for value in thor_frame])
         worker = StopAfterRs232EchoWorker(0, config, events, worker_id=11, port=port)
@@ -548,8 +569,8 @@ class SerialTesterTests(unittest.TestCase):
         worker.run()
 
         self.assertEqual(port.writes, [thor_frame])
-        reply_event = next(event for event in events.queue if event["last"].startswith("RS485 Reply on"))
-        self.assertIn("ThorSerialV2 complete 16-byte frame", reply_event["last"])
+        reply_event = next(event for event in events.queue if event["last"].startswith("ThorSerial Reply on"))
+        self.assertIn("received complete RX", reply_event["last"])
         self.assertEqual(reply_event["rx_hex"], thor_frame.hex(" ").upper())
         self.assertEqual(reply_event["tx_hex"], thor_frame.hex(" ").upper())
 

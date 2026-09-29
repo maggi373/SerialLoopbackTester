@@ -62,12 +62,14 @@ DEFAULT_RS485_PAYLOAD_HEX = "A55AA55AA55AA55A"
 THOR_SERIAL_V2_RS485_PAYLOAD = bytes.fromhex(
     "55 AA 00 FF 13 37 42 7E 81 18 24 C3 3C 5A A5 E7"
 )
+THOR_SERIAL_V2_BAUDRATE = 9600
 PARITY_OPTIONS = ("N", "E", "O", "M", "S")
 BYTESIZE_OPTIONS = ("5", "6", "7", "8")
 STOPBITS_OPTIONS = ("1", "1.5", "2")
-RS232_MODE_OPTIONS = ("Loopback Test", "RS485 Reply", "PARO Simulator")
+RS232_MODE_OPTIONS = ("Loopback Test", "RS485 Reply", "ThorSerial Reply", "PARO Simulator")
 RS232_MODE_LOOPBACK = "loopback"
 RS232_MODE_RS485_REPLY = "rs485_reply"
+RS232_MODE_THORSERIAL_REPLY = "thorserial_reply"
 RS232_MODE_PARO = "paro"
 DEFAULT_PARO_DEVICE_ID = 1
 LINUX_SETSERIAL_MODE_NONE = "none"
@@ -415,6 +417,8 @@ def rs232_mode_label(mode: object) -> str:
         return "PARO Simulator"
     if normalized == RS232_MODE_RS485_REPLY:
         return "RS485 Reply"
+    if normalized == RS232_MODE_THORSERIAL_REPLY:
+        return "ThorSerial Reply"
     return "Loopback Test"
 
 
@@ -424,6 +428,13 @@ def rs232_mode_value(label: object) -> str:
         return RS232_MODE_PARO
     if normalized in {RS232_MODE_RS485_REPLY, "rs485 reply"}:
         return RS232_MODE_RS485_REPLY
+    if normalized in {
+        RS232_MODE_THORSERIAL_REPLY,
+        "thorserial reply",
+        "thorserialv2 reply",
+        "thor reply",
+    }:
+        return RS232_MODE_THORSERIAL_REPLY
     return RS232_MODE_LOOPBACK
 
 
@@ -436,6 +447,9 @@ def rs232_port_role_text(config: dict) -> str:
     if config.get("mode") == RS232_MODE_RS485_REPLY:
         prefix = f"{port} · " if port else ""
         return f"{prefix}RS485 Reply"
+    if config.get("mode") == RS232_MODE_THORSERIAL_REPLY:
+        prefix = f"{port} · " if port else ""
+        return f"{prefix}ThorSerial Reply"
     return port
 
 
@@ -503,7 +517,12 @@ def normalize_rs232(item: object, index: int) -> dict:
         port = base["port"]
     enabled = as_bool(source.get("enabled", base["enabled"]), base["enabled"])
     mode = str(source.get("mode", base["mode"])).strip().lower()
-    if mode not in {RS232_MODE_LOOPBACK, RS232_MODE_RS485_REPLY, RS232_MODE_PARO}:
+    if mode not in {
+        RS232_MODE_LOOPBACK,
+        RS232_MODE_RS485_REPLY,
+        RS232_MODE_THORSERIAL_REPLY,
+        RS232_MODE_PARO,
+    }:
         mode = base["mode"]
     paro_device_id = normalize_count(source.get("paro_device_id"), base["paro_device_id"], 0, 99)
     payload_hex = sanitize_hex_payload(source.get("payload_hex"), base["payload_hex"])
@@ -605,9 +624,13 @@ def normalize_preset_roles(value: object) -> dict[str, str]:
         valid_values = {
             RS232_MODE_LOOPBACK,
             RS232_MODE_RS485_REPLY,
+            RS232_MODE_THORSERIAL_REPLY,
             RS232_MODE_PARO,
             "loopback test",
             "rs485 reply",
+            "thorserial reply",
+            "thorserialv2 reply",
+            "thor reply",
             "paro simulator",
         }
         if name and raw_mode_text in valid_values:
@@ -1001,7 +1024,11 @@ class RS232Worker(threading.Thread):
 
     def open_port(self):
         read_timeout = float(self.config["timeout_s"])
-        if self.config.get("mode") in {RS232_MODE_PARO, RS232_MODE_RS485_REPLY}:
+        if self.config.get("mode") in {
+            RS232_MODE_PARO,
+            RS232_MODE_RS485_REPLY,
+            RS232_MODE_THORSERIAL_REPLY,
+        }:
             read_timeout = min(read_timeout, 0.05)
         return open_serial_endpoint(
             self.config["port"],
@@ -1056,6 +1083,11 @@ class RS232Worker(threading.Thread):
         serial_format = serial_format_text(self.config)
         last_wait_report_at = 0.0
         received_total = 0
+        configured_frames = tuple(
+            bytes.fromhex(payload_hex)
+            for payload_hex in self.config.get("rs485_reply_expected_payloads", ())
+            if payload_hex
+        )
 
         while not self.stop_event.is_set():
             waiting = max(int(getattr(port, "in_waiting", 0)), 0)
@@ -1074,27 +1106,20 @@ class RS232Worker(threading.Thread):
                 continue
 
             received = bytearray(first_chunk)
-            thor_frame = THOR_SERIAL_V2_RS485_PAYLOAD
-            thor_frame_detected = len(received) <= len(thor_frame) and thor_frame.startswith(received)
-            if thor_frame_detected:
-                # ThorSerialV2 sends a fixed 16-byte binary frame with no CRLF.
-                # Some USB/Focal RS232 paths expose that continuous wire frame to
-                # pyserial one byte at a time with gaps longer than our generic
-                # idle detector. Block for each remaining byte so the reply is
-                # transmitted once, only after the complete Thor frame arrives.
-                while len(received) < len(thor_frame) and not self.stop_event.is_set():
-                    chunk = port.read(1)
-                    if not chunk:
-                        thor_frame_detected = False
-                        break
-                    received.extend(chunk)
-                    if not thor_frame.startswith(received):
-                        thor_frame_detected = False
-                        break
+            expected_candidates = [frame for frame in configured_frames if frame.startswith(received)]
+            expected_frame_complete = any(frame == received for frame in expected_candidates)
+            while expected_candidates and not expected_frame_complete and not self.stop_event.is_set():
+                maximum_length = max(len(frame) for frame in expected_candidates)
+                chunk = port.read(maximum_length - len(received))
+                if not chunk:
+                    break
+                received.extend(chunk)
+                expected_candidates = [frame for frame in expected_candidates if frame.startswith(received)]
+                expected_frame_complete = any(frame == received for frame in expected_candidates)
 
             quiet_deadline = time.monotonic() + quiet_period_s
             while (
-                not thor_frame_detected
+                not expected_frame_complete
                 and len(received) < MAX_PACKET_SIZE_BYTES
                 and not self.stop_event.is_set()
             ):
@@ -1130,11 +1155,66 @@ class RS232Worker(threading.Thread):
                 f"RS485 Reply on {port_name}: received RX {reply_hex} ({len(reply)} bytes); "
                 f"echoed TX {reply_hex} ({written} bytes) on the same port; "
                 f"total RX {received_total} bytes"
-                f"{' [ThorSerialV2 complete 16-byte frame]' if thor_frame_detected else ''}",
+                f"{' [complete configured RS485 request]' if expected_frame_complete else ''}",
                 pass_inc=1,
                 tx_hex=reply_hex,
                 rx_hex=reply_hex,
             )
+
+    def run_thorserial_reply(self, port: serial.Serial) -> None:
+        """Echo only complete ThorSerialV2 16-byte binary test frames."""
+        frame = THOR_SERIAL_V2_RS485_PAYLOAD
+        frame_hex = frame.hex(" ").upper()
+        port_name = str(self.config["port"])
+        candidate = bytearray()
+        last_wait_report_at = 0.0
+        ignored_bytes = 0
+
+        while not self.stop_event.is_set():
+            waiting = max(int(getattr(port, "in_waiting", 0)), 0)
+            chunk = port.read(max(1, min(waiting, MAX_PACKET_SIZE_BYTES)))
+            if not chunk:
+                now = time.monotonic()
+                if now - last_wait_report_at >= 1.0:
+                    self.emit(
+                        "Running",
+                        f"ThorSerial Reply waiting on {port_name}: RX 0 complete frames; "
+                        f"expecting {frame_hex} (16 bytes, no CRLF)",
+                    )
+                    last_wait_report_at = now
+                continue
+
+            for value in chunk:
+                expected_value = frame[len(candidate)]
+                if value == expected_value:
+                    candidate.append(value)
+                elif value == frame[0]:
+                    ignored_bytes += len(candidate)
+                    candidate[:] = bytes((value,))
+                else:
+                    ignored_bytes += len(candidate) + 1
+                    candidate.clear()
+
+                if len(candidate) != len(frame):
+                    continue
+
+                if self.stop_event.wait(RS485_REPLY_MIN_TURNAROUND_S):
+                    return
+                written = port.write(frame)
+                port.flush()
+                if written != len(frame):
+                    raise SerialException(
+                        f"ThorSerial Reply on {port_name} wrote only {written} of {len(frame)} bytes"
+                    )
+                self.emit(
+                    "PASS",
+                    f"ThorSerial Reply on {port_name}: received complete RX {frame_hex} (16 bytes); "
+                    f"echoed complete TX {frame_hex} (16 bytes); ignored {ignored_bytes} non-frame byte(s)",
+                    pass_inc=1,
+                    tx_hex=frame_hex,
+                    rx_hex=frame_hex,
+                )
+                candidate.clear()
 
     def run(self) -> None:
         payload = bytes.fromhex(self.config["payload_hex"])
@@ -1179,8 +1259,15 @@ class RS232Worker(threading.Thread):
                             "Running",
                             f"RS485 Reply listening on {port_name} at {serial_format_text(self.config)}; "
                             "each complete received burst is echoed back through this same port. "
-                            "ThorSerialV2's fixed 16-byte RS485 frame is collected in full before reply."
+                            "Configured RS485 request payloads are collected in full before reply."
                             f"{hint_suffix}",
+                            log=True,
+                        )
+                    elif self.config.get("mode") == RS232_MODE_THORSERIAL_REPLY:
+                        self.emit(
+                            "Running",
+                            f"ThorSerial Reply listening on {port_name} at 9600 baud, 8N1; "
+                            "waits for the exact 16-byte ThorSerialV2 frame and echoes it once with no CRLF.",
                             log=True,
                         )
                     else:
@@ -1199,6 +1286,8 @@ class RS232Worker(threading.Thread):
                         self.run_paro_simulator(port)
                     elif self.config.get("mode") == RS232_MODE_RS485_REPLY:
                         self.run_rs485_reply(port)
+                    elif self.config.get("mode") == RS232_MODE_THORSERIAL_REPLY:
+                        self.run_thorserial_reply(port)
                     else:
                         while not self.stop_event.is_set():
                             port.reset_output_buffer()
@@ -3273,8 +3362,9 @@ class SerialTesterApp(tk.Tk):
             editor,
             text=(
                 "RS485 Reply role: this port sends nothing by itself. It listens for any incoming byte burst, "
-                "waits until the burst is complete, then echoes the exact bytes back through this same port. "
-                "It is not assigned to a specific RS485 row; the physical wiring determines which request it answers."
+                "waits for the complete configured RS485 request, then echoes the exact bytes through this same port. "
+                "ThorSerial Reply is a dedicated 9600 8N1 mode that only echoes ThorSerialV2's exact 16-byte "
+                "binary test frame; neither reply mode adds CRLF. Physical wiring determines which request arrives."
             ),
             wraplength=430,
             justify=tk.LEFT,
@@ -4208,6 +4298,9 @@ class SerialTesterApp(tk.Tk):
                         item for item in enabled_requests if serial_formats_match(worker_cfg, item)
                     ]
                     if matching_requests:
+                        worker_cfg["rs485_reply_expected_payloads"] = tuple(
+                            str(item["payload_hex"]) for item in matching_requests
+                        )
                         matched_names = ", ".join(
                             f"{item['name']} ({item['sender_port']})" for item in matching_requests
                         )
@@ -4229,6 +4322,15 @@ class SerialTesterApp(tk.Tk):
                         worker_cfg["rs485_reply_target_hint"] = (
                             "No enabled RS485 request row is currently configured."
                         )
+                elif cfg.get("mode") == RS232_MODE_THORSERIAL_REPLY:
+                    worker_cfg.update(
+                        {
+                            "baudrate": THOR_SERIAL_V2_BAUDRATE,
+                            "bytesize": 8,
+                            "parity": "N",
+                            "stopbits": 1.0,
+                        }
+                    )
                 worker_id = self.next_worker_id
                 self.next_worker_id += 1
                 worker = RS232Worker(idx, worker_cfg, self.event_queue, worker_id=worker_id)

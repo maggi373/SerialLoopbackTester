@@ -4,11 +4,11 @@ Made by: `maggi373`
 
 Python GUI tool for:
 - 40 RS232 loopback tests (same port send/receive)
-- Per-port RS232 roles: normal loopback testing, passive RS485 reply, or a stateful PARO/Digiquartz sensor simulator
+- Per-port RS232 roles: normal loopback testing, passive RS485 reply, dedicated ThorSerialV2 reply, or a stateful PARO/Digiquartz sensor simulator
 - PARO ports support addressed commands, independent device IDs, measurement ramps, configuration reads/writes, errors, held/continuous readings, and output masks based on the Arduino `parosim` implementation
 - 8 RS485 tests (RS485 sends -> an RS232 port in **RS485 Reply** role echoes the received bytes -> RS485 verifies the response)
-- RS485 reply routing is port-agnostic; any RS232 channel assigned the dedicated reply role is opened with the shared baud/framing settings of the enabled RS485 request rows, listens for a complete incoming byte burst, waits for the line to become idle, and echoes those exact bytes through the same port without transmitting unsolicited loopback packets
-- The reply role recognizes ThorSerialV2's raw 16-byte RS485 test frame (`55 AA 00 FF 13 37 42 7E 81 18 24 C3 3C 5A A5 E7`) and buffers all 16 bytes before sending one complete reply; no CRLF is added
+- RS485 reply routing is port-agnostic; any RS232 channel assigned the dedicated reply role is opened with the shared baud/framing settings of the enabled RS485 request rows, collects a complete configured request even when it arrives one byte at a time, and echoes those exact bytes through the same port without transmitting unsolicited loopback packets
+- **ThorSerial Reply** is a separate fixed `9600 8N1` role. It waits for ThorSerialV2's exact raw 16-byte frame (`55 AA 00 FF 13 37 42 7E 81 18 24 C3 3C 5A A5 E7`) and sends one complete echo; no CRLF is added
 - Message mismatches are ignored for the first 2 seconds after communication starts on every channel; port-open and serial I/O errors remain visible
 - Customizable RS232 and RS485 counts from Settings (defaults: 40 and 8) (MAX: 256 and 128)
 - Combined Overview page for all ports/channels with color status bars and row outlines
@@ -280,6 +280,7 @@ The UPort installer also applies the bundled modern-kernel compatibility patch a
 2. Configure RS232 ports and names.
    - Set **Role** to **Loopback Test** for normal testing.
    - Set **Role** to **RS485 Reply** for a passive port that sends nothing by itself and echoes only bytes it receives.
+   - Set **Role** to **ThorSerial Reply** for a passive `9600 8N1` port that replies only to ThorSerialV2's complete 16-byte test frame.
    - Set **Role** to **PARO Simulator** to make that port behave like a PARO sensor.
    - Set a **PARO Device ID** from `00` to `99` for each simulated sensor. The PARO/Arduino default serial format is `9600 8N1`.
 3. Configure each RS485 port and name. Assign at least one connected RS232 channel the **RS485 Reply** role for the return path.
@@ -338,7 +339,7 @@ The UPort installer also applies the bundled modern-kernel compatibility patch a
 - The last applied preset lives in `ui.active_preset_idx`.
 - Global serial control values live in `ui.global_baudrate`, `ui.global_interval_ms`, and `ui.global_packet_size_bytes`.
 - Channel counts live in `ui.rs232_count` and `ui.rs485_pair_count`.
-- Each RS232 entry stores its assignment in `mode` (`loopback`, `rs485_reply`, or `paro`) and its simulated address in `paro_device_id`.
+- Each RS232 entry stores its assignment in `mode` (`loopback`, `rs485_reply`, `thorserial_reply`, or `paro`) and its simulated address in `paro_device_id`.
 - Preset button labels, selected channel names, and optional per-name RS232 role assignments live in `ui.presets`.
 - Port names are not forced to be unique/valid, so you can stage configs on systems with fewer serial ports.
 - Presets match channel names, so multiple names can use the same serial port; duplicate channel names are enabled/disabled together.
