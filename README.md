@@ -141,6 +141,15 @@ The legacy **Apply with setserial** button remains available for systems already
 - `port 2`: RS-422
 - `port 3`: RS-485 four-wire
 
+The same tab also provides **Temporary Fastcom / 8250 UART clock correction** for a Fastcom 232/8-PCI-335 handled by Linux's `8250_exar` driver. Select the card's `/dev/ttyS...` port, leave **Baud base** at `921600` when the physical card is using its documented 14.7456 MHz default clock, and click **Apply temporary baud base** while that port's test is stopped. The application runs and verifies:
+
+```bash
+setserial /dev/ttyS4 baud_base 921600
+setserial -g /dev/ttyS4
+```
+
+This changes the running kernel's divisor calculation for that port to `921600 × 16 = 14,745,600 Hz`; it does not program the card, patch a kernel module, or save a boot-time setting. Start the port afterward with the actual wire baud rate, such as `9600`. A reboot or `8250_exar` reload restores the driver's normal `1843200` baud base. Apply the temporary override separately to every Fastcom port used by the test. Root privileges are normally required, so use the provided root launcher when the command reports permission denied.
+
 Run `./install_serial_access.sh` once, reconnect the adapter, and log out/in to let a normal `dialout` user access both the TTY and the Moxa USB control endpoint. Root remains available through `bash ./run_production.sh --root` or the packaged `./start_as_root.sh` for immediate testing.
 
 For manual verification outside the GUI, apply the same userspace command after the TTY has been opened/configured:

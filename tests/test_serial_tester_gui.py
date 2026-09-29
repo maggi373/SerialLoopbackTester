@@ -385,6 +385,52 @@ class SerialTesterTests(unittest.TestCase):
             text=True,
         )
 
+    @patch.object(app_module.sys, "platform", "linux")
+    def test_fastcom_baud_base_override_is_runtime_only_and_verified(self):
+        set_result = types.SimpleNamespace(stdout="", stderr="")
+        get_result = types.SimpleNamespace(
+            stdout="/dev/ttyS4, UART: 16550A, Baud_base: 921600, close_delay: 50\n",
+            stderr="",
+        )
+        with (
+            patch.object(app_module.shutil, "which", return_value="/usr/bin/setserial"),
+            patch.object(app_module.subprocess, "run", side_effect=(set_result, get_result)) as run,
+        ):
+            actual = app_module.apply_linux_uart_baud_base("/dev/ttyS4", 921600)
+
+        self.assertEqual(actual, 921600)
+        self.assertEqual(
+            run.call_args_list,
+            [
+                unittest.mock.call(
+                    ["/usr/bin/setserial", "/dev/ttyS4", "baud_base", "921600"],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ),
+                unittest.mock.call(
+                    ["/usr/bin/setserial", "-g", "/dev/ttyS4"],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ),
+            ],
+        )
+
+    @patch.object(app_module.sys, "platform", "linux")
+    def test_fastcom_baud_base_override_rejects_unverified_value(self):
+        set_result = types.SimpleNamespace(stdout="", stderr="")
+        get_result = types.SimpleNamespace(
+            stdout="/dev/ttyS4, UART: 16550A, Baud_base: 1843200, close_delay: 50\n",
+            stderr="",
+        )
+        with (
+            patch.object(app_module.shutil, "which", return_value="/usr/bin/setserial"),
+            patch.object(app_module.subprocess, "run", side_effect=(set_result, get_result)),
+            self.assertRaisesRegex(OSError, "reported baud_base 1843200"),
+        ):
+            app_module.apply_linux_uart_baud_base("/dev/ttyS4", 921600)
+
     def test_unsupported_serial_url_explains_raw_tcp_format(self):
         with self.assertRaisesRegex(ValueError, "socket://host:port"):
             app_module.open_serial_endpoint(
@@ -552,7 +598,13 @@ class SerialTesterTests(unittest.TestCase):
                 pass
 
         with patch.object(app_module, "RS232Worker", CapturingWorker):
-            app_module.SerialTesterApp.start_single_test(app, "rs232", 0, startup_delay_s=0.0)
+            app_module.SerialTesterApp.start_single_test(
+                app,
+                "rs232",
+                0,
+                startup_delay_s=0.0,
+                refresh_health=False,
+            )
 
         worker_config = captured_configs[0]
         self.assertEqual(worker_config["baudrate"], 38400)
