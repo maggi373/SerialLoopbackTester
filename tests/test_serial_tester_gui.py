@@ -386,50 +386,36 @@ class SerialTesterTests(unittest.TestCase):
         )
 
     @patch.object(app_module.sys, "platform", "linux")
-    def test_fastcom_baud_base_override_is_runtime_only_and_verified(self):
-        set_result = types.SimpleNamespace(stdout="", stderr="")
-        get_result = types.SimpleNamespace(
-            stdout="/dev/ttyS4, UART: 16550A, Baud_base: 921600, close_delay: 50\n",
+    def test_fastcom_clock_programmer_uses_restricted_installed_helper(self):
+        completed = types.SimpleNamespace(
+            stdout="Programmed Fastcom 0x000b at 0000:04:00.0 to 29.4912 MHz.\n",
             stderr="",
         )
         with (
-            patch.object(app_module.shutil, "which", return_value="/usr/bin/setserial"),
-            patch.object(app_module.subprocess, "run", side_effect=(set_result, get_result)) as run,
+            patch.object(app_module.os.path, "isfile", return_value=True),
+            patch.object(app_module.os, "access", return_value=True),
+            patch.object(app_module.shutil, "which", return_value="/usr/bin/sudo"),
+            patch.object(app_module.subprocess, "run", return_value=completed) as run,
         ):
-            actual = app_module.apply_linux_uart_baud_base("/dev/ttyS4", 921600)
+            result = app_module.program_linux_fastcom_clock("/dev/ttyS4")
 
-        self.assertEqual(actual, 921600)
-        self.assertEqual(
-            run.call_args_list,
+        self.assertIn("29.4912 MHz", result)
+        run.assert_called_once_with(
             [
-                unittest.mock.call(
-                    ["/usr/bin/setserial", "/dev/ttyS4", "baud_base", "921600"],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                ),
-                unittest.mock.call(
-                    ["/usr/bin/setserial", "-a", "/dev/ttyS4"],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                ),
+                "/usr/bin/sudo",
+                "-n",
+                app_module.LINUX_FASTCOM_CLOCK_HELPER,
+                "/dev/ttyS4",
             ],
+            check=True,
+            capture_output=True,
+            text=True,
         )
 
     @patch.object(app_module.sys, "platform", "linux")
-    def test_fastcom_baud_base_override_rejects_unverified_value(self):
-        set_result = types.SimpleNamespace(stdout="", stderr="")
-        get_result = types.SimpleNamespace(
-            stdout="/dev/ttyS4, UART: 16550A, Baud_base: 1843200, close_delay: 50\n",
-            stderr="",
-        )
-        with (
-            patch.object(app_module.shutil, "which", return_value="/usr/bin/setserial"),
-            patch.object(app_module.subprocess, "run", side_effect=(set_result, get_result)),
-            self.assertRaisesRegex(OSError, "reported baud_base 1843200"),
-        ):
-            app_module.apply_linux_uart_baud_base("/dev/ttyS4", 921600)
+    def test_fastcom_clock_programmer_rejects_non_ttys_device(self):
+        with self.assertRaisesRegex(ValueError, "/dev/ttyS"):
+            app_module.program_linux_fastcom_clock("/dev/ttyUSB0")
 
     def test_unsupported_serial_url_explains_raw_tcp_format(self):
         with self.assertRaisesRegex(ValueError, "socket://host:port"):

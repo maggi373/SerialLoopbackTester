@@ -92,7 +92,7 @@ APP_FOLDER_NAME = "SerialLoopbackTester"
 LINUX_CONFIG_HOME_OVERRIDE_ENV = "SERIAL_LOOPBACK_TESTER_CONFIG_HOME"
 LINUX_CONFIG_OWNER_UID_ENV = "SERIAL_LOOPBACK_TESTER_CONFIG_UID"
 LINUX_CONFIG_OWNER_GID_ENV = "SERIAL_LOOPBACK_TESTER_CONFIG_GID"
-LINUX_FASTCOM_BAUD_HELPER = "/usr/local/libexec/serial-loopback-fastcom-baud-base"
+LINUX_FASTCOM_CLOCK_HELPER = "/usr/local/libexec/serial-loopback-program-fastcom-clock"
 LINUX_BUTTON_PADDING = (3, 1)
 STOPBITS_ALLOWED_VALUES = (1.0, 1.5, 2.0)
 RS232_WORKER_CONFIG_KEYS = (
@@ -305,43 +305,29 @@ def apply_linux_setserial_mode(port_name: object, mode: object) -> None:
         raise OSError(f"setserial failed for {endpoint} using port {mode_code}: {detail}") from exc
 
 
-def _linux_setserial_endpoint(port_name: object) -> tuple[str, str]:
+def program_linux_fastcom_clock(port_name: object) -> str:
+    """Program one Fastcom PCI-335 card to the clock expected by 8250_exar."""
     if not sys.platform.startswith("linux"):
-        raise OSError("Linux UART settings are only available on Linux.")
+        raise OSError("Fastcom clock programming is only available on Linux.")
 
     endpoint = normalize_port_text(port_name)
-    if "://" in endpoint or not endpoint.startswith("/dev/"):
-        raise ValueError("Linux UART settings require a local /dev/... serial device.")
+    if not re.fullmatch(r"/dev/ttyS\d+", endpoint):
+        raise ValueError("Select one /dev/ttyS<N> port belonging to the Fastcom card.")
 
-    setserial_path = shutil.which("setserial")
-    if not setserial_path:
-        raise OSError("setserial is not installed (Fedora: sudo dnf install setserial).")
-    return setserial_path, endpoint
-
-
-def _linux_fastcom_helper_prefix() -> list[str]:
-    helper = LINUX_FASTCOM_BAUD_HELPER
+    helper = LINUX_FASTCOM_CLOCK_HELPER
     if not os.path.isfile(helper) or not os.access(helper, os.X_OK):
-        return []
-    if hasattr(os, "geteuid") and os.geteuid() == 0:
-        return [helper]
-    sudo_path = shutil.which("sudo")
-    if not sudo_path:
         raise OSError(
-            f"The Fastcom permission helper is installed at {helper}, but sudo is unavailable."
+            f"The restricted Fastcom clock helper is not installed at {helper}. "
+            "Run install_serial_access.sh again from the updated application folder."
         )
-    return [sudo_path, "-n", helper]
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        command = [helper, endpoint]
+    else:
+        sudo_path = shutil.which("sudo")
+        if not sudo_path:
+            raise OSError("sudo is required to run the restricted Fastcom clock helper.")
+        command = [sudo_path, "-n", helper, endpoint]
 
-
-def query_linux_uart_baud_base(port_name: object) -> int:
-    """Read the kernel's temporary baud-base value for a local UART."""
-    setserial_path, endpoint = _linux_setserial_endpoint(port_name)
-    helper_prefix = _linux_fastcom_helper_prefix()
-    command = (
-        [*helper_prefix, "get", endpoint]
-        if helper_prefix
-        else [setserial_path, "-a", endpoint]
-    )
     try:
         completed = subprocess.run(
             command,
@@ -351,52 +337,9 @@ def query_linux_uart_baud_base(port_name: object) -> int:
         )
     except subprocess.CalledProcessError as exc:
         detail = (exc.stderr or exc.stdout or str(exc)).strip()
-        raise OSError(f"setserial could not read {endpoint}: {detail}") from exc
+        raise OSError(f"Fastcom clock programming failed for {endpoint}: {detail}") from exc
 
-    output = f"{completed.stdout}\n{completed.stderr}"
-    match = re.search(r"baud[_ ]base\s*:\s*(\d+)", output, flags=re.IGNORECASE)
-    if not match:
-        detail = output.strip() or "no baud_base value was returned"
-        raise OSError(f"setserial could not verify the baud base for {endpoint}: {detail}")
-    return int(match.group(1))
-
-
-def apply_linux_uart_baud_base(port_name: object, baud_base: object) -> int:
-    """Temporarily override Linux divisor math without changing the card clock."""
-    setserial_path, endpoint = _linux_setserial_endpoint(port_name)
-    try:
-        requested = int(baud_base)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("Baud base must be a whole number.") from exc
-    if requested < 9600:
-        raise ValueError("Baud base must be at least 9600.")
-
-    helper_prefix = _linux_fastcom_helper_prefix()
-    command = (
-        [*helper_prefix, "set", endpoint, str(requested)]
-        if helper_prefix
-        else [setserial_path, endpoint, "baud_base", str(requested)]
-    )
-    try:
-        subprocess.run(
-            command,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except subprocess.CalledProcessError as exc:
-        detail = (exc.stderr or exc.stdout or str(exc)).strip()
-        raise OSError(
-            f"setserial failed to set {endpoint} baud_base {requested}: {detail}. "
-            "Changing baud_base normally requires root privileges."
-        ) from exc
-
-    actual = query_linux_uart_baud_base(endpoint)
-    if actual != requested:
-        raise OSError(
-            f"Linux reported baud_base {actual} for {endpoint} after {requested} was requested."
-        )
-    return actual
+    return completed.stdout.strip() or f"Programmed the Fastcom card containing {endpoint}."
 
 
 def open_serial_endpoint(
@@ -3724,26 +3667,25 @@ class SerialTesterApp(tk.Tk):
             justify=tk.LEFT,
         ).grid(row=2, column=0, sticky="w", pady=(14, 0))
 
-        fastcom_panel = ttk.LabelFrame(parent, text="Temporary Fastcom / 8250 UART clock correction", padding=16)
+        fastcom_panel = ttk.LabelFrame(parent, text="Fastcom PCI-335 physical clock", padding=16)
         fastcom_panel.grid(row=1, column=0, sticky="new", pady=(14, 0))
         fastcom_panel.columnconfigure(1, weight=1)
 
         ttk.Label(
             fastcom_panel,
             text=(
-                "For a Fastcom 232/8-PCI-335 using 8250_exar, this changes only Linux's temporary "
-                "baud-base value; it does not reprogram the hardware clock or modify kernel files. "
-                "Use 921600 when the card is at its 14.7456 MHz default. Stop the selected port before applying. "
-                "A reboot or driver reload restores the driver's value (normally 1843200)."
+                "Select any /dev/ttyS port belonging to the Fastcom card to program that whole card to "
+                "29.4912 MHz, matching 8250_exar. The helper verifies the PCI ID, refuses if any port on that "
+                "card is open, temporarily unbinds only that card, sends Fastcom's 0x100801 clock word, and "
+                "rebinds it. Stop all tests first. With three cards, apply once to one port from each card."
             ),
             wraplength=900,
             justify=tk.LEFT,
         ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 12))
 
         self.linux_fastcom_device_var = tk.StringVar()
-        self.linux_fastcom_baud_base_var = tk.StringVar(value="921600")
         self.linux_fastcom_command_var = tk.StringVar()
-        self.linux_fastcom_status_var = tk.StringVar(value="No Fastcom baud-base command has been run.")
+        self.linux_fastcom_status_var = tk.StringVar(value="No Fastcom clock command has been run.")
 
         ttk.Label(fastcom_panel, text="Fastcom device").grid(
             row=1, column=0, sticky="w", pady=4, padx=(0, 12)
@@ -3756,15 +3698,8 @@ class SerialTesterApp(tk.Tk):
         )
         self.linux_fastcom_device_combo.grid(row=1, column=1, sticky="ew", pady=4)
 
-        ttk.Label(fastcom_panel, text="Baud base").grid(
-            row=2, column=0, sticky="w", pady=4, padx=(0, 12)
-        )
-        ttk.Entry(fastcom_panel, textvariable=self.linux_fastcom_baud_base_var).grid(
-            row=2, column=1, sticky="ew", pady=4
-        )
-
         ttk.Label(fastcom_panel, text="Command").grid(
-            row=3, column=0, sticky="nw", pady=4, padx=(0, 12)
+            row=2, column=0, sticky="nw", pady=4, padx=(0, 12)
         )
         ttk.Label(
             fastcom_panel,
@@ -3772,19 +3707,14 @@ class SerialTesterApp(tk.Tk):
             font="TkFixedFont",
             wraplength=900,
             justify=tk.LEFT,
-        ).grid(row=3, column=1, sticky="ew", pady=4)
+        ).grid(row=2, column=1, sticky="ew", pady=4)
 
         fastcom_actions = ttk.Frame(fastcom_panel)
-        fastcom_actions.grid(row=4, column=0, columnspan=2, sticky="w", pady=(12, 8))
+        fastcom_actions.grid(row=3, column=0, columnspan=2, sticky="w", pady=(12, 8))
         ttk.Button(
             fastcom_actions,
-            text="Apply temporary baud base",
-            command=self.apply_linux_fastcom_baud_base_from_panel,
-        ).pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Button(
-            fastcom_actions,
-            text="Read current baud base",
-            command=self.read_linux_fastcom_baud_base_from_panel,
+            text="Program selected card to 29.4912 MHz",
+            command=self.program_linux_fastcom_clock_from_panel,
         ).pack(side=tk.LEFT)
 
         ttk.Label(
@@ -3792,12 +3722,11 @@ class SerialTesterApp(tk.Tk):
             textvariable=self.linux_fastcom_status_var,
             wraplength=900,
             justify=tk.LEFT,
-        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
         self.linux_setserial_device_var.trace_add("write", self._update_linux_setserial_command_preview)
         self.linux_setserial_mode_var.trace_add("write", self._update_linux_setserial_command_preview)
         self.linux_fastcom_device_var.trace_add("write", self._update_linux_fastcom_command_preview)
-        self.linux_fastcom_baud_base_var.trace_add("write", self._update_linux_fastcom_command_preview)
         self._update_linux_setserial_command_preview()
         self._update_linux_fastcom_command_preview()
 
@@ -3824,56 +3753,37 @@ class SerialTesterApp(tk.Tk):
 
     def _update_linux_fastcom_command_preview(self, *_args: object) -> None:
         device = normalize_port_text(self.linux_fastcom_device_var.get()) or "/dev/ttyS4"
-        baud_base = self.linux_fastcom_baud_base_var.get().strip() or "921600"
-        self.linux_fastcom_command_var.set(f"setserial {device} baud_base {baud_base}")
+        self.linux_fastcom_command_var.set(
+            f"sudo -n {LINUX_FASTCOM_CLOCK_HELPER} {device}"
+        )
 
-    def read_linux_fastcom_baud_base_from_panel(self) -> None:
+    def program_linux_fastcom_clock_from_panel(self) -> None:
         device = normalize_port_text(self.linux_fastcom_device_var.get())
         if not device:
             messagebox.showerror("Select device", "Select or enter the Fastcom /dev/ttyS... device.")
             return
-        try:
-            baud_base = query_linux_uart_baud_base(device)
-        except (OSError, ValueError) as exc:
-            detail = serial_error_detail(exc)
-            self.linux_fastcom_status_var.set(f"FAILED: {detail}")
-            messagebox.showerror("Baud-base read failed", detail)
-            self.append_log(f"Fastcom baud-base read failed for {device}: {detail}")
-            return
-
-        self.linux_fastcom_baud_base_var.set(str(baud_base))
-        result = f"Current Linux baud_base for {device}: {baud_base} (uartclk {baud_base * 16} Hz)"
-        self.linux_fastcom_status_var.set(result)
-        self.append_log(result)
-
-    def apply_linux_fastcom_baud_base_from_panel(self) -> None:
-        device = normalize_port_text(self.linux_fastcom_device_var.get())
-        if not device:
-            messagebox.showerror("Select device", "Select or enter the Fastcom /dev/ttyS... device.")
-            return
-        if self._active_serial_for_device(device) is not None:
-            detail = "Stop the test using this port before changing its baud base, then start it again afterward."
+        if self.rs232_workers or self.rs485_workers:
+            detail = "Stop all RS232 and RS485 tests before temporarily unbinding a Fastcom card."
             self.linux_fastcom_status_var.set(f"NOT APPLIED: {detail}")
-            messagebox.showerror("Port is active", detail)
+            messagebox.showerror("Tests are active", detail)
             return
         try:
-            baud_base = int(self.linux_fastcom_baud_base_var.get().strip())
-            actual = apply_linux_uart_baud_base(device, baud_base)
+            helper_result = program_linux_fastcom_clock(device)
         except (OSError, ValueError) as exc:
             detail = serial_error_detail(exc)
             self.linux_fastcom_status_var.set(f"FAILED: {detail}")
-            messagebox.showerror("Baud-base command failed", detail)
-            self.append_log(f"Fastcom baud-base command failed for {device}: {detail}")
+            messagebox.showerror("Fastcom clock programming failed", detail)
+            self.append_log(f"Fastcom clock programming failed for {device}: {detail}")
             return
 
         result = (
-            f"Applied temporary Linux baud_base {actual} to {device} "
-            f"(uartclk {actual * 16} Hz). Start the port now using the real wire baud rate. "
-            "No kernel file or persistent setting was changed."
+            f"{helper_result} Use the real configured wire baud rate now. "
+            "Repeat once using a port from each remaining Fastcom card."
         )
         self.linux_fastcom_status_var.set(result)
         self.append_log(result)
-        messagebox.showinfo("Temporary baud base applied", result)
+        self.refresh_com_port_options(show_message=False)
+        messagebox.showinfo("Fastcom clock programmed", result)
 
     def _active_serial_for_device(self, device: str):
         for worker in self.rs232_workers.values():

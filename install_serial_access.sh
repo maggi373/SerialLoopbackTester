@@ -33,14 +33,17 @@ if [[ -n "$target_user" && "$target_user" != "root" ]] && id "$target_user" >/de
     usermod -aG dialout "$target_user"
     echo "Added $target_user to the dialout group."
 
-    source_helper="${script_dir}/set_fastcom_baud_base.sh"
-    if [[ ! -f "$source_helper" ]]; then
-        echo "Missing restricted Fastcom helper: $source_helper" >&2
+    source_helper="${script_dir}/program_fastcom_clock.sh"
+    source_programmer="${script_dir}/program_fastcom_clock.py"
+    if [[ ! -f "$source_helper" || ! -f "$source_programmer" ]]; then
+        echo "Missing restricted Fastcom clock helper files beside the installer." >&2
         exit 1
     fi
-    helper_path="/usr/local/libexec/serial-loopback-fastcom-baud-base"
+    helper_path="/usr/local/libexec/serial-loopback-program-fastcom-clock"
+    programmer_path="/usr/local/libexec/serial-loopback-program-fastcom-clock.py"
     install -d -o root -g root -m 0755 /usr/local/libexec
     install -o root -g root -m 0755 "$source_helper" "$helper_path"
+    install -o root -g root -m 0755 "$source_programmer" "$programmer_path"
 
     command -v visudo >/dev/null 2>&1 || {
         echo "visudo is required to install the restricted Fastcom permission." >&2
@@ -55,7 +58,7 @@ if [[ -n "$target_user" && "$target_user" != "root" ]] && id "$target_user" >/de
     chmod 0440 "$sudoers_temp"
     visudo -cf "$sudoers_temp" >/dev/null
     install -o root -g root -m 0440 "$sudoers_temp" "$sudoers_path"
-    echo "Installed restricted Fastcom baud-base permission for $target_user."
+    echo "Installed restricted Fastcom PCI-335 clock-programming permission for $target_user."
 fi
 
 udevadm control --reload-rules
@@ -63,8 +66,5 @@ udevadm trigger --subsystem-match=tty
 udevadm trigger --subsystem-match=usb --attr-match=idVendor=110a
 
 echo "Installed serial access rules at $rules_path."
-if ! command -v setserial >/dev/null 2>&1; then
-    echo "Warning: install setserial before using the Fastcom baud-base control (Fedora: sudo dnf install setserial)."
-fi
 echo "Unplug/replug USB serial adapters, then log out and back in."
 echo "Until then, use ./run_as_root.sh for immediate access."
