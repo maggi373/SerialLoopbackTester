@@ -106,6 +106,12 @@ class ScriptedPort:
         return self.reads.pop(0) if self.reads else b""
 
 
+class OneByteAtATimePort(ScriptedPort):
+    @property
+    def in_waiting(self):
+        return 0
+
+
 class StopAfterRs232EchoWorker(app_module.RS232Worker):
     def __init__(self, *args, port, **kwargs):
         super().__init__(*args, **kwargs)
@@ -530,6 +536,22 @@ class SerialTesterTests(unittest.TestCase):
         worker.run()
 
         self.assertEqual(port.writes, [bytes.fromhex("A55AA55A")])
+
+    def test_rs485_reply_collects_complete_thor_frame_when_driver_reports_one_byte_at_a_time(self):
+        events = queue.Queue()
+        config = app_module.default_rs232_item(0)
+        config["mode"] = app_module.RS232_MODE_RS485_REPLY
+        thor_frame = app_module.THOR_SERIAL_V2_RS485_PAYLOAD
+        port = OneByteAtATimePort([bytes((value,)) for value in thor_frame])
+        worker = StopAfterRs232EchoWorker(0, config, events, worker_id=11, port=port)
+
+        worker.run()
+
+        self.assertEqual(port.writes, [thor_frame])
+        reply_event = next(event for event in events.queue if event["last"].startswith("RS485 Reply on"))
+        self.assertIn("ThorSerialV2 complete 16-byte frame", reply_event["last"])
+        self.assertEqual(reply_event["rx_hex"], thor_frame.hex(" ").upper())
+        self.assertEqual(reply_event["tx_hex"], thor_frame.hex(" ").upper())
 
     def test_loopback_role_does_not_echo_unexpected_bytes(self):
         events = queue.Queue()

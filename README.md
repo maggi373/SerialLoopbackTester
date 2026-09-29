@@ -8,6 +8,7 @@ Python GUI tool for:
 - PARO ports support addressed commands, independent device IDs, measurement ramps, configuration reads/writes, errors, held/continuous readings, and output masks based on the Arduino `parosim` implementation
 - 8 RS485 tests (RS485 sends -> an RS232 port in **RS485 Reply** role echoes the received bytes -> RS485 verifies the response)
 - RS485 reply routing is port-agnostic; any RS232 channel assigned the dedicated reply role is opened with the shared baud/framing settings of the enabled RS485 request rows, listens for a complete incoming byte burst, waits for the line to become idle, and echoes those exact bytes through the same port without transmitting unsolicited loopback packets
+- The reply role recognizes ThorSerialV2's raw 16-byte RS485 test frame (`55 AA 00 FF 13 37 42 7E 81 18 24 C3 3C 5A A5 E7`) and buffers all 16 bytes before sending one complete reply; no CRLF is added
 - Message mismatches are ignored for the first 2 seconds after communication starts on every channel; port-open and serial I/O errors remain visible
 - Customizable RS232 and RS485 counts from Settings (defaults: 40 and 8) (MAX: 256 and 128)
 - Combined Overview page for all ports/channels with color status bars and row outlines

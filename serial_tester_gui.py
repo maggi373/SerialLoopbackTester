@@ -59,6 +59,9 @@ RS232_PAYLOAD_PATTERN_HEX = "55AA"
 RS485_PAYLOAD_PATTERN_HEX = "A55A"
 DEFAULT_RS232_PAYLOAD_HEX = "55AA55AA55AA55AA"
 DEFAULT_RS485_PAYLOAD_HEX = "A55AA55AA55AA55A"
+THOR_SERIAL_V2_RS485_PAYLOAD = bytes.fromhex(
+    "55 AA 00 FF 13 37 42 7E 81 18 24 C3 3C 5A A5 E7"
+)
 PARITY_OPTIONS = ("N", "E", "O", "M", "S")
 BYTESIZE_OPTIONS = ("5", "6", "7", "8")
 STOPBITS_OPTIONS = ("1", "1.5", "2")
@@ -1071,8 +1074,30 @@ class RS232Worker(threading.Thread):
                 continue
 
             received = bytearray(first_chunk)
+            thor_frame = THOR_SERIAL_V2_RS485_PAYLOAD
+            thor_frame_detected = len(received) <= len(thor_frame) and thor_frame.startswith(received)
+            if thor_frame_detected:
+                # ThorSerialV2 sends a fixed 16-byte binary frame with no CRLF.
+                # Some USB/Focal RS232 paths expose that continuous wire frame to
+                # pyserial one byte at a time with gaps longer than our generic
+                # idle detector. Block for each remaining byte so the reply is
+                # transmitted once, only after the complete Thor frame arrives.
+                while len(received) < len(thor_frame) and not self.stop_event.is_set():
+                    chunk = port.read(1)
+                    if not chunk:
+                        thor_frame_detected = False
+                        break
+                    received.extend(chunk)
+                    if not thor_frame.startswith(received):
+                        thor_frame_detected = False
+                        break
+
             quiet_deadline = time.monotonic() + quiet_period_s
-            while len(received) < MAX_PACKET_SIZE_BYTES and not self.stop_event.is_set():
+            while (
+                not thor_frame_detected
+                and len(received) < MAX_PACKET_SIZE_BYTES
+                and not self.stop_event.is_set()
+            ):
                 waiting = max(int(getattr(port, "in_waiting", 0)), 0)
                 if waiting:
                     chunk = port.read(min(waiting, MAX_PACKET_SIZE_BYTES - len(received)))
@@ -1104,7 +1129,8 @@ class RS232Worker(threading.Thread):
                 "PASS",
                 f"RS485 Reply on {port_name}: received RX {reply_hex} ({len(reply)} bytes); "
                 f"echoed TX {reply_hex} ({written} bytes) on the same port; "
-                f"total RX {received_total} bytes",
+                f"total RX {received_total} bytes"
+                f"{' [ThorSerialV2 complete 16-byte frame]' if thor_frame_detected else ''}",
                 pass_inc=1,
                 tx_hex=reply_hex,
                 rx_hex=reply_hex,
@@ -1152,7 +1178,9 @@ class RS232Worker(threading.Thread):
                         self.emit(
                             "Running",
                             f"RS485 Reply listening on {port_name} at {serial_format_text(self.config)}; "
-                            f"each complete received burst is echoed back through this same port.{hint_suffix}",
+                            "each complete received burst is echoed back through this same port. "
+                            "ThorSerialV2's fixed 16-byte RS485 frame is collected in full before reply."
+                            f"{hint_suffix}",
                             log=True,
                         )
                     else:
