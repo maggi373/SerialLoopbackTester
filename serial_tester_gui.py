@@ -1167,6 +1167,7 @@ class RS232Worker(threading.Thread):
         frame_hex = frame.hex(" ").upper()
         port_name = str(self.config["port"])
         candidate = bytearray()
+        raw_window = bytearray()
         last_wait_report_at = 0.0
         ignored_bytes = 0
 
@@ -1176,14 +1177,19 @@ class RS232Worker(threading.Thread):
             if not chunk:
                 now = time.monotonic()
                 if now - last_wait_report_at >= 1.0:
+                    last_raw_hex = raw_window.hex(" ").upper()
+                    raw_suffix = f"; last raw RX {last_raw_hex}" if last_raw_hex else ""
                     self.emit(
                         "Running",
-                        f"ThorSerial Reply waiting on {port_name}: RX 0 complete frames; "
+                        f"ThorSerial Reply waiting on {port_name}: no new bytes{raw_suffix}; "
                         f"expecting {frame_hex} (16 bytes, no CRLF)",
                     )
                     last_wait_report_at = now
                 continue
 
+            raw_window.extend(chunk)
+            del raw_window[:-64]
+            completed_frame = False
             for value in chunk:
                 expected_value = frame[len(candidate)]
                 if value == expected_value:
@@ -1215,6 +1221,26 @@ class RS232Worker(threading.Thread):
                     rx_hex=frame_hex,
                 )
                 candidate.clear()
+                raw_window.clear()
+                completed_frame = True
+
+            if completed_frame:
+                continue
+
+            raw_hex = raw_window.hex(" ").upper()
+            if candidate:
+                detail = (
+                    f"possible frame prefix {len(candidate)}/{len(frame)} bytes; "
+                    "waiting for the remaining bytes; no reply sent yet"
+                )
+            else:
+                detail = "does not match the ThorSerialV2 frame; no reply sent"
+            self.emit(
+                "Running",
+                f"ThorSerial Reply on {port_name}: raw RX {raw_hex} ({len(raw_window)} recent byte(s)); "
+                f"{detail}",
+                rx_hex=raw_hex,
+            )
 
     def run(self) -> None:
         payload = bytes.fromhex(self.config["payload_hex"])

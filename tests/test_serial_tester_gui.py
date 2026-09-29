@@ -122,7 +122,7 @@ class StopAfterRs232EchoWorker(app_module.RS232Worker):
 
     def emit(self, status, last, **kwargs):
         super().emit(status, last, **kwargs)
-        if last.startswith(("RS485 Reply on", "ThorSerial Reply on")):
+        if status == "PASS" and last.startswith(("RS485 Reply on", "ThorSerial Reply on")):
             self.stop_event.set()
 
 
@@ -130,6 +130,13 @@ class StopAfterRs232FailureWorker(StopAfterRs232EchoWorker):
     def emit(self, status, last, **kwargs):
         app_module.RS232Worker.emit(self, status, last, **kwargs)
         if status == "FAIL":
+            self.stop_event.set()
+
+
+class StopAfterThorRawRxWorker(StopAfterRs232EchoWorker):
+    def emit(self, status, last, **kwargs):
+        app_module.RS232Worker.emit(self, status, last, **kwargs)
+        if "raw RX" in last:
             self.stop_event.set()
 
 
@@ -569,10 +576,30 @@ class SerialTesterTests(unittest.TestCase):
         worker.run()
 
         self.assertEqual(port.writes, [thor_frame])
-        reply_event = next(event for event in events.queue if event["last"].startswith("ThorSerial Reply on"))
+        reply_event = next(
+            event
+            for event in events.queue
+            if event["status"] == "PASS" and event["last"].startswith("ThorSerial Reply on")
+        )
         self.assertIn("received complete RX", reply_event["last"])
         self.assertEqual(reply_event["rx_hex"], thor_frame.hex(" ").upper())
         self.assertEqual(reply_event["tx_hex"], thor_frame.hex(" ").upper())
+
+    def test_thorserial_reply_displays_corrupt_raw_input_without_replying(self):
+        events = queue.Queue()
+        config = app_module.default_rs232_item(0)
+        config["mode"] = app_module.RS232_MODE_THORSERIAL_REPLY
+        port = ScriptedPort([bytes.fromhex("C7C4")])
+        worker = StopAfterThorRawRxWorker(0, config, events, worker_id=13, port=port)
+
+        worker.run()
+
+        self.assertEqual(port.writes, [])
+        raw_event = next(event for event in events.queue if "raw RX" in event["last"])
+        self.assertIn("raw RX C7 C4", raw_event["last"])
+        self.assertIn("no reply sent", raw_event["last"])
+        self.assertEqual(raw_event["rx_hex"], "C7 C4")
+        self.assertIsNone(raw_event["tx_hex"])
 
     def test_loopback_role_does_not_echo_unexpected_bytes(self):
         events = queue.Queue()
