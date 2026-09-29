@@ -90,14 +90,16 @@ cp README.md "${repo_dir}/dist/${portable_name}/README.md"
 cp "${repo_dir}/start.sh" "${repo_dir}/start_as_root.sh" \
     "${repo_dir}/run_as_root.sh" "${repo_dir}/install_serial_access.sh" \
     "${repo_dir}/install_fedora_driver_dependencies.sh" \
-    "${repo_dir}/set_moxa_uport_mode.sh" "${repo_dir}/moxa_uport_mode.py" \
+    "${repo_dir}/set_moxa_uport_mode.sh" "${repo_dir}/set_fastcom_baud_base.sh" \
+    "${repo_dir}/moxa_uport_mode.py" \
     "${repo_dir}/dist/${portable_name}/"
 chmod +x "${repo_dir}/dist/${portable_name}/start.sh" \
     "${repo_dir}/dist/${portable_name}/start_as_root.sh" \
     "${repo_dir}/dist/${portable_name}/run_as_root.sh" \
     "${repo_dir}/dist/${portable_name}/install_serial_access.sh" \
     "${repo_dir}/dist/${portable_name}/install_fedora_driver_dependencies.sh" \
-    "${repo_dir}/dist/${portable_name}/set_moxa_uport_mode.sh"
+    "${repo_dir}/dist/${portable_name}/set_moxa_uport_mode.sh" \
+    "${repo_dir}/dist/${portable_name}/set_fastcom_baud_base.sh"
 
 bundle_driver_dir="${repo_dir}/dist/${portable_name}/drivers/moxa"
 mkdir -p "$bundle_driver_dir"

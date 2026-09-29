@@ -409,7 +409,7 @@ class SerialTesterTests(unittest.TestCase):
                     text=True,
                 ),
                 unittest.mock.call(
-                    ["/usr/bin/setserial", "-g", "/dev/ttyS4"],
+                    ["/usr/bin/setserial", "-a", "/dev/ttyS4"],
                     check=True,
                     capture_output=True,
                     text=True,

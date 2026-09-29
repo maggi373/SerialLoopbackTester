@@ -145,12 +145,12 @@ The same tab also provides **Temporary Fastcom / 8250 UART clock correction** fo
 
 ```bash
 setserial /dev/ttyS4 baud_base 921600
-setserial -g /dev/ttyS4
+setserial -a /dev/ttyS4
 ```
 
 This changes the running kernel's divisor calculation for that port to `921600 × 16 = 14,745,600 Hz`; it does not program the card, patch a kernel module, or save a boot-time setting. Start the port afterward with the actual wire baud rate, such as `9600`. A reboot or `8250_exar` reload restores the driver's normal `1843200` baud base. Apply the temporary override separately to every Fastcom port used by the test. Root privileges are normally required, so use the provided root launcher when the command reports permission denied.
 
-Run `./install_serial_access.sh` once, reconnect the adapter, and log out/in to let a normal `dialout` user access both the TTY and the Moxa USB control endpoint. Root remains available through `bash ./run_production.sh --root` or the packaged `./start_as_root.sh` for immediate testing.
+Run `./install_serial_access.sh` once, reconnect the adapter, and log out/in to let a normal `dialout` user access the serial devices and the Moxa USB control endpoint. The installer also covers Fastcom PCI devices `18f7:000a/000b` and installs a root-owned, narrowly restricted permission helper for reading or setting their temporary baud base to `921600` or `1843200`. This lets the Fastcom control work from a normal application launch without granting unrestricted passwordless `setserial`. Root remains available through `bash ./run_production.sh --root` or the packaged `./start_as_root.sh` for immediate testing.
 
 For manual verification outside the GUI, apply the same userspace command after the TTY has been opened/configured:
 

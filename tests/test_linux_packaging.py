@@ -122,10 +122,27 @@ class LinuxPackagingTests(unittest.TestCase):
         self.assertIn('KERNEL=="ttyUSB[0-9]*"', script)
         self.assertIn('KERNEL=="ttyACM[0-9]*"', script)
         self.assertIn('KERNEL=="ttyr[0-9a-fA-F]*"', script)
+        self.assertIn('KERNEL=="ttyS[0-9]*"', script)
+        self.assertIn('ATTRS{vendor}=="0x18f7"', script)
+        self.assertIn('ATTRS{device}=="0x000b"', script)
         self.assertIn('ATTR{idVendor}=="110a"', script)
         self.assertIn('ATTR{idProduct}=="1150"', script)
         self.assertIn('ATTR{idProduct}=="1151"', script)
         self.assertIn("usermod -aG dialout", script)
+        self.assertIn("serial-loopback-fastcom-baud-base", script)
+        self.assertIn("visudo -cf", script)
+        self.assertIn("NOPASSWD:", script)
+
+    def test_fastcom_permission_helper_is_restricted_and_packaged(self):
+        helper = (REPO_ROOT / "set_fastcom_baud_base.sh").read_text(encoding="utf-8")
+        build_script = (REPO_ROOT / "build_linux.sh").read_text(encoding="utf-8")
+
+        self.assertIn('^/dev/ttyS[0-9]+$', helper)
+        self.assertIn('"0x18f7"', helper)
+        self.assertIn('"0x000b"', helper)
+        self.assertIn('"921600"', helper)
+        self.assertIn('"1843200"', helper)
+        self.assertIn('set_fastcom_baud_base.sh', build_script)
 
     def test_manual_moxa_mode_script_is_packaged_and_uses_userspace_helper(self):
         script = (REPO_ROOT / "set_moxa_uport_mode.sh").read_text(encoding="utf-8")

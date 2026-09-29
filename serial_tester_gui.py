@@ -92,6 +92,7 @@ APP_FOLDER_NAME = "SerialLoopbackTester"
 LINUX_CONFIG_HOME_OVERRIDE_ENV = "SERIAL_LOOPBACK_TESTER_CONFIG_HOME"
 LINUX_CONFIG_OWNER_UID_ENV = "SERIAL_LOOPBACK_TESTER_CONFIG_UID"
 LINUX_CONFIG_OWNER_GID_ENV = "SERIAL_LOOPBACK_TESTER_CONFIG_GID"
+LINUX_FASTCOM_BAUD_HELPER = "/usr/local/libexec/serial-loopback-fastcom-baud-base"
 LINUX_BUTTON_PADDING = (3, 1)
 STOPBITS_ALLOWED_VALUES = (1.0, 1.5, 2.0)
 RS232_WORKER_CONFIG_KEYS = (
@@ -318,12 +319,32 @@ def _linux_setserial_endpoint(port_name: object) -> tuple[str, str]:
     return setserial_path, endpoint
 
 
+def _linux_fastcom_helper_prefix() -> list[str]:
+    helper = LINUX_FASTCOM_BAUD_HELPER
+    if not os.path.isfile(helper) or not os.access(helper, os.X_OK):
+        return []
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        return [helper]
+    sudo_path = shutil.which("sudo")
+    if not sudo_path:
+        raise OSError(
+            f"The Fastcom permission helper is installed at {helper}, but sudo is unavailable."
+        )
+    return [sudo_path, "-n", helper]
+
+
 def query_linux_uart_baud_base(port_name: object) -> int:
     """Read the kernel's temporary baud-base value for a local UART."""
     setserial_path, endpoint = _linux_setserial_endpoint(port_name)
+    helper_prefix = _linux_fastcom_helper_prefix()
+    command = (
+        [*helper_prefix, "get", endpoint]
+        if helper_prefix
+        else [setserial_path, "-a", endpoint]
+    )
     try:
         completed = subprocess.run(
-            [setserial_path, "-g", endpoint],
+            command,
             check=True,
             capture_output=True,
             text=True,
@@ -350,9 +371,15 @@ def apply_linux_uart_baud_base(port_name: object, baud_base: object) -> int:
     if requested < 9600:
         raise ValueError("Baud base must be at least 9600.")
 
+    helper_prefix = _linux_fastcom_helper_prefix()
+    command = (
+        [*helper_prefix, "set", endpoint, str(requested)]
+        if helper_prefix
+        else [setserial_path, endpoint, "baud_base", str(requested)]
+    )
     try:
         subprocess.run(
-            [setserial_path, endpoint, "baud_base", str(requested)],
+            command,
             check=True,
             capture_output=True,
             text=True,
