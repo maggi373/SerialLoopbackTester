@@ -36,7 +36,7 @@ MAX_RS485_PAIR_COUNT = 128
 DEFAULT_PRESET_COUNT = 5
 FAILURE_WINDOW_SECONDS = 3600
 FAILURE_WINDOW_LABEL = "1h"
-FAILURE_GRACE_PERIOD_SECONDS = 2.0
+FAILURE_GRACE_PERIOD_SECONDS = 5.0
 WORKER_EVENT_POLL_MS = 50
 UI_RENDER_INTERVAL_MS = 200
 MAX_WORKER_EVENTS_PER_POLL = 500
@@ -305,14 +305,15 @@ def apply_linux_setserial_mode(port_name: object, mode: object) -> None:
         raise OSError(f"setserial failed for {endpoint} using port {mode_code}: {detail}") from exc
 
 
-def program_linux_fastcom_clock(port_name: object) -> str:
-    """Program one Fastcom PCI-335 card to the clock expected by 8250_exar."""
+def program_linux_fastcom_clock(port_name: object | None = None) -> str:
+    """Program all Fastcom PCI-335 cards, or the card containing one ttyS port."""
     if not sys.platform.startswith("linux"):
         raise OSError("Fastcom clock programming is only available on Linux.")
 
-    endpoint = normalize_port_text(port_name)
-    if not re.fullmatch(r"/dev/ttyS\d+", endpoint):
+    endpoint = normalize_port_text(port_name) if port_name is not None else ""
+    if endpoint and not re.fullmatch(r"/dev/ttyS\d+", endpoint):
         raise ValueError("Select one /dev/ttyS<N> port belonging to the Fastcom card.")
+    target = endpoint or "--all"
 
     helper = LINUX_FASTCOM_CLOCK_HELPER
     if not os.path.isfile(helper) or not os.access(helper, os.X_OK):
@@ -321,12 +322,12 @@ def program_linux_fastcom_clock(port_name: object) -> str:
             "Run install_serial_access.sh again from the updated application folder."
         )
     if hasattr(os, "geteuid") and os.geteuid() == 0:
-        command = [helper, endpoint]
+        command = [helper, target]
     else:
         sudo_path = shutil.which("sudo")
         if not sudo_path:
             raise OSError("sudo is required to run the restricted Fastcom clock helper.")
-        command = [sudo_path, "-n", helper, endpoint]
+        command = [sudo_path, "-n", helper, target]
 
     try:
         completed = subprocess.run(
@@ -337,9 +338,10 @@ def program_linux_fastcom_clock(port_name: object) -> str:
         )
     except subprocess.CalledProcessError as exc:
         detail = (exc.stderr or exc.stdout or str(exc)).strip()
-        raise OSError(f"Fastcom clock programming failed for {endpoint}: {detail}") from exc
+        scope = endpoint or "all detected cards"
+        raise OSError(f"Fastcom clock programming failed for {scope}: {detail}") from exc
 
-    return completed.stdout.strip() or f"Programmed the Fastcom card containing {endpoint}."
+    return completed.stdout.strip() or "Programmed all detected Fastcom PCI-335 cards."
 
 
 def open_serial_endpoint(
@@ -1017,6 +1019,7 @@ class RS232Worker(threading.Thread):
         self.stop_event = threading.Event()
         self.port_lock = threading.Lock()
         self.active_port: serial.Serial | None = None
+        self.good_grace_deadline: float | None = None
 
     def stop(self) -> None:
         self.stop_event.set()
@@ -1043,6 +1046,12 @@ class RS232Worker(threading.Thread):
         tx_hex: str | None = None,
         rx_hex: str | None = None,
     ) -> None:
+        if status == "PASS" and self.good_grace_deadline is not None:
+            remaining_s = self.good_grace_deadline - time.monotonic()
+            if remaining_s > 0:
+                status = "Running"
+                last = f"Startup grace: verified communication; Good in {remaining_s:.1f}s. {last}"
+                pass_inc = 0
         self.event_queue.put(
             {
                 "group": "rs232",
@@ -1290,7 +1299,8 @@ class RS232Worker(threading.Thread):
             as_float(self.config.get("failure_grace_period_s", FAILURE_GRACE_PERIOD_SECONDS), FAILURE_GRACE_PERIOD_SECONDS),
             0.0,
         )
-        failure_grace_deadline: float | None = None
+        failure_grace_deadline = time.monotonic() + grace_period_s
+        self.good_grace_deadline = failure_grace_deadline
         payload_hex = payload.hex(" ").upper()
         port_name = str(self.config["port"])
 
@@ -1344,9 +1354,6 @@ class RS232Worker(threading.Thread):
 
                     port.reset_input_buffer()
                     port.reset_output_buffer()
-                    if failure_grace_deadline is None:
-                        failure_grace_deadline = time.monotonic() + grace_period_s
-
                     if self.config.get("mode") == RS232_MODE_PARO:
                         self.run_paro_simulator(port)
                     elif self.config.get("mode") == RS232_MODE_RS485_REPLY:
@@ -1422,6 +1429,7 @@ class RS485PairWorker(threading.Thread):
         self.stop_event = threading.Event()
         self.port_lock = threading.Lock()
         self.active_ports: tuple[serial.Serial, ...] = ()
+        self.good_grace_deadline: float | None = None
 
     def stop(self) -> None:
         self.stop_event.set()
@@ -1447,6 +1455,12 @@ class RS485PairWorker(threading.Thread):
         tx_hex: str | None = None,
         rx_hex: str | None = None,
     ) -> None:
+        if status == "PASS" and self.good_grace_deadline is not None:
+            remaining_s = self.good_grace_deadline - time.monotonic()
+            if remaining_s > 0:
+                status = "Running"
+                last = f"Startup grace: verified communication; Good in {remaining_s:.1f}s. {last}"
+                pass_inc = 0
         self.event_queue.put(
             {
                 "group": "rs485",
@@ -1484,7 +1498,8 @@ class RS485PairWorker(threading.Thread):
             as_float(self.config.get("failure_grace_period_s", FAILURE_GRACE_PERIOD_SECONDS), FAILURE_GRACE_PERIOD_SECONDS),
             0.0,
         )
-        failure_grace_deadline: float | None = None
+        failure_grace_deadline = time.monotonic() + grace_period_s
+        self.good_grace_deadline = failure_grace_deadline
         payload_hex = payload.hex(" ").upper()
         port_name = str(self.config["sender_port"])
 
@@ -1518,9 +1533,6 @@ class RS485PairWorker(threading.Thread):
                         self.emit("Standby", f"Startup delay {startup_delay_s:.1f}s")
                         if self.stop_event.wait(startup_delay_s):
                             break
-
-                    if failure_grace_deadline is None:
-                        failure_grace_deadline = time.monotonic() + grace_period_s
 
                     while not self.stop_event.is_set():
                         sender.reset_input_buffer()
@@ -1682,6 +1694,8 @@ class SerialTesterApp(tk.Tk):
 
         self._refresh_window_title()
         self._build_ui()
+        if sys.platform.startswith("linux"):
+            self._program_all_fastcom_clocks(show_message=False, automatic=True)
         self.refresh_com_port_options(show_message=False)
         self._populate_tables()
         self._select_first_rows()
@@ -2495,16 +2509,21 @@ class SerialTesterApp(tk.Tk):
                     ("RS485", cfg["name"], cfg["sender_port"], state["status"], state["last"])
                 )
 
-        fault_review_count = len(self.fault_records)
-        green_ready = runtime_seconds >= FAILURE_WINDOW_SECONDS and recent_failures == 0
+        active_states = [self.rs232_state[idx] for idx in self.rs232_workers if idx < len(self.rs232_state)]
+        active_states.extend(
+            self.rs485_state[idx] for idx in self.rs485_workers if idx < len(self.rs485_state)
+        )
+        all_active_channels_good = len(active_states) == active_workers and active_workers > 0 and all(
+            state["status"] == "PASS" for state in active_states
+        )
 
         if current_issues:
             alarm_text = "ALARM"
             alarm_color = "#DC2626"
-        elif active_workers > 0 and fault_review_count > 0:
+        elif active_workers > 0 and self.fault_records:
             alarm_text = "RECOVERED"
             alarm_color = "#8B5CF6"
-        elif active_workers > 0 and green_ready:
+        elif active_workers > 0 and all_active_channels_good:
             alarm_text = "GOOD"
             alarm_color = "#22C55E"
         else:
@@ -2593,7 +2612,10 @@ class SerialTesterApp(tk.Tk):
 
         ttk.Label(
             legend,
-            text="Combined live status: Green = good, Purple = recovered, Yellow = standby, Red = wrong message/error",
+            text=(
+                "Combined live status: Green = good after 5-second startup grace, Purple = recovered after "
+                "a later fault, Yellow = standby, Red = wrong message/error"
+            ),
         ).grid(row=0, column=0, sticky="w")
         ttk.Checkbutton(
             legend,
@@ -3674,32 +3696,20 @@ class SerialTesterApp(tk.Tk):
         ttk.Label(
             fastcom_panel,
             text=(
-                "Select any /dev/ttyS port belonging to the Fastcom card to program that whole card to "
-                "29.4912 MHz, matching 8250_exar. The helper verifies the PCI ID, refuses if any port on that "
-                "card is open, temporarily unbinds only that card, sends Fastcom's 0x100801 clock word, and "
-                "rebinds it. Stop all tests first. With three cards, apply once to one port from each card."
+                "At application launch, every detected Fastcom 232/4 or 232/8 PCI-335 card is automatically "
+                "programmed to 29.4912 MHz, matching 8250_exar. The helper validates every card and refuses "
+                "if any of their ports are open before it changes the first card. It then unbinds, programs, "
+                "and rebinds each physical card separately. Stop all tests before running it again manually."
             ),
             wraplength=900,
             justify=tk.LEFT,
         ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 12))
 
-        self.linux_fastcom_device_var = tk.StringVar()
         self.linux_fastcom_command_var = tk.StringVar()
-        self.linux_fastcom_status_var = tk.StringVar(value="No Fastcom clock command has been run.")
-
-        ttk.Label(fastcom_panel, text="Fastcom device").grid(
-            row=1, column=0, sticky="w", pady=4, padx=(0, 12)
-        )
-        self.linux_fastcom_device_combo = ttk.Combobox(
-            fastcom_panel,
-            textvariable=self.linux_fastcom_device_var,
-            values=self.com_port_values,
-            state="normal",
-        )
-        self.linux_fastcom_device_combo.grid(row=1, column=1, sticky="ew", pady=4)
+        self.linux_fastcom_status_var = tk.StringVar(value="Waiting for automatic Fastcom clock setup.")
 
         ttk.Label(fastcom_panel, text="Command").grid(
-            row=2, column=0, sticky="nw", pady=4, padx=(0, 12)
+            row=1, column=0, sticky="nw", pady=4, padx=(0, 12)
         )
         ttk.Label(
             fastcom_panel,
@@ -3707,13 +3717,13 @@ class SerialTesterApp(tk.Tk):
             font="TkFixedFont",
             wraplength=900,
             justify=tk.LEFT,
-        ).grid(row=2, column=1, sticky="ew", pady=4)
+        ).grid(row=1, column=1, sticky="ew", pady=4)
 
         fastcom_actions = ttk.Frame(fastcom_panel)
-        fastcom_actions.grid(row=3, column=0, columnspan=2, sticky="w", pady=(12, 8))
+        fastcom_actions.grid(row=2, column=0, columnspan=2, sticky="w", pady=(12, 8))
         ttk.Button(
             fastcom_actions,
-            text="Program selected card to 29.4912 MHz",
+            text="Program all detected Fastcom cards now",
             command=self.program_linux_fastcom_clock_from_panel,
         ).pack(side=tk.LEFT)
 
@@ -3722,11 +3732,10 @@ class SerialTesterApp(tk.Tk):
             textvariable=self.linux_fastcom_status_var,
             wraplength=900,
             justify=tk.LEFT,
-        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
         self.linux_setserial_device_var.trace_add("write", self._update_linux_setserial_command_preview)
         self.linux_setserial_mode_var.trace_add("write", self._update_linux_setserial_command_preview)
-        self.linux_fastcom_device_var.trace_add("write", self._update_linux_fastcom_command_preview)
         self._update_linux_setserial_command_preview()
         self._update_linux_fastcom_command_preview()
 
@@ -3752,38 +3761,40 @@ class SerialTesterApp(tk.Tk):
         )
 
     def _update_linux_fastcom_command_preview(self, *_args: object) -> None:
-        device = normalize_port_text(self.linux_fastcom_device_var.get()) or "/dev/ttyS4"
         self.linux_fastcom_command_var.set(
-            f"sudo -n {LINUX_FASTCOM_CLOCK_HELPER} {device}"
+            f"sudo -n {LINUX_FASTCOM_CLOCK_HELPER} --all"
         )
 
     def program_linux_fastcom_clock_from_panel(self) -> None:
-        device = normalize_port_text(self.linux_fastcom_device_var.get())
-        if not device:
-            messagebox.showerror("Select device", "Select or enter the Fastcom /dev/ttyS... device.")
-            return
+        self._program_all_fastcom_clocks(show_message=True, automatic=False)
+
+    def _program_all_fastcom_clocks(self, show_message: bool, automatic: bool) -> bool:
         if self.rs232_workers or self.rs485_workers:
-            detail = "Stop all RS232 and RS485 tests before temporarily unbinding a Fastcom card."
+            detail = "Stop all RS232 and RS485 tests before temporarily unbinding the Fastcom cards."
             self.linux_fastcom_status_var.set(f"NOT APPLIED: {detail}")
-            messagebox.showerror("Tests are active", detail)
-            return
+            if show_message:
+                messagebox.showerror("Tests are active", detail)
+            return False
         try:
-            helper_result = program_linux_fastcom_clock(device)
+            helper_result = program_linux_fastcom_clock()
         except (OSError, ValueError) as exc:
             detail = serial_error_detail(exc)
             self.linux_fastcom_status_var.set(f"FAILED: {detail}")
-            messagebox.showerror("Fastcom clock programming failed", detail)
-            self.append_log(f"Fastcom clock programming failed for {device}: {detail}")
-            return
+            if show_message:
+                messagebox.showerror("Fastcom clock programming failed", detail)
+            launch_text = "Automatic Fastcom clock setup failed" if automatic else "Fastcom clock programming failed"
+            self.append_log(f"{launch_text}: {detail}")
+            return False
 
         result = (
-            f"{helper_result} Use the real configured wire baud rate now. "
-            "Repeat once using a port from each remaining Fastcom card."
+            f"{helper_result} Use the real configured wire baud rate now."
         )
         self.linux_fastcom_status_var.set(result)
         self.append_log(result)
         self.refresh_com_port_options(show_message=False)
-        messagebox.showinfo("Fastcom clock programmed", result)
+        if show_message:
+            messagebox.showinfo("Fastcom clocks programmed", result)
+        return True
 
     def _active_serial_for_device(self, device: str):
         for worker in self.rs232_workers.values():

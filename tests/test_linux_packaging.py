@@ -143,6 +143,8 @@ class LinuxPackagingTests(unittest.TestCase):
         self.assertIn('"0x000b"', programmer)
         self.assertIn("FASTCOM_29MHZ_WORD = 0x100801", programmer)
         self.assertIn("MPIO_LEVEL_OFFSET = 0x90", programmer)
+        self.assertIn("find_all_fastcom_pci_devices", programmer)
+        self.assertIn('sys.argv[1] == "--all"', programmer)
         self.assertIn('driver_path / "unbind"', programmer)
         self.assertIn('driver_path / "bind"', programmer)
         self.assertIn('program_fastcom_clock.sh', build_script)

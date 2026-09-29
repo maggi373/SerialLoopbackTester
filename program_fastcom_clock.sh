@@ -2,7 +2,7 @@
 set -euo pipefail
 
 [[ "$#" -eq 1 ]] || {
-    echo "Usage: $0 /dev/ttyS<N>" >&2
+    echo "Usage: $0 --all | /dev/ttyS<N>" >&2
     exit 2
 }
 [[ "${EUID}" -eq 0 ]] || {

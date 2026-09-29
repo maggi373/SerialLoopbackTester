@@ -141,9 +141,9 @@ The legacy **Apply with setserial** button remains available for systems already
 - `port 2`: RS-422
 - `port 3`: RS-485 four-wire
 
-The same tab also provides **Fastcom PCI-335 physical clock** control for Fastcom 232/4 and 232/8 PCI-335 cards handled by Linux's `8250_exar` (`exar_serial`) driver. Stop every RS232 and RS485 test, select any `/dev/ttyS...` port from the target card, and click **Program selected card to 29.4912 MHz**. With three cards, repeat this once using one port from each card.
+The same tab also provides **Fastcom PCI-335 physical clock** control for Fastcom 232/4 and 232/8 PCI-335 cards handled by Linux's `8250_exar` (`exar_serial`) driver. At application launch it automatically discovers and programs every supported physical card to 29.4912 MHz before the two-second test autostart. The manual **Program all detected Fastcom cards now** button repeats the same operation after all RS232 and RS485 tests have been stopped.
 
-The restricted helper verifies PCI ID `18f7:000a` or `18f7:000b`, rejects console cards and cards with open ports, temporarily unbinds only the selected PCI card, maps its BAR0, and sends Fastcom's official `0x100801` MPIO clock word at register offset `0x90`. It always attempts to rebind `exar_serial`, including after a programming error. This makes the physical clock match the 29.4912 MHz value assumed by `8250_exar`, so tests should use their real wire baud such as `9600`. The clock affects every port on that card and remains until power loss or another driver reprograms it; no kernel file or boot setting is modified.
+The restricted helper verifies PCI ID `18f7:000a` or `18f7:000b` and checks that every port on every detected card is idle before changing the first card. It then temporarily unbinds one card at a time, maps its BAR0, sends Fastcom's official `0x100801` MPIO clock word at register offset `0x90`, and rebinds `exar_serial`. This makes the physical clock match the 29.4912 MHz value assumed by `8250_exar`, so tests should use their real wire baud such as `9600`. The clock affects every port on that card and remains until power loss or another driver reprograms it; no kernel file or boot setting is modified.
 
 Run `./install_serial_access.sh` once, reconnect the adapter, and log out/in to let a normal `dialout` user access the serial devices and the Moxa USB control endpoint. The installer also covers Fastcom PCI devices `18f7:000a/000b` and installs a root-owned, narrowly restricted clock helper. Its passwordless permission can invoke only that validator/programmer, not arbitrary PCI or `setserial` commands. Root remains available through `bash ./run_production.sh --root` or the packaged `./start_as_root.sh` for immediate testing.
 
@@ -284,7 +284,7 @@ The UPort installer also applies the bundled modern-kernel compatibility patch a
 2. Configure RS232 ports and names.
    - Set **Role** to **Loopback Test** for normal testing.
    - Set **Role** to **RS485 Reply** for a passive port that sends nothing by itself and echoes only bytes it receives.
-   - Set **Role** to **ThorSerial Reply** for a passive port that uses that RS232 row's selected baud rate/framing and replies only to ThorSerialV2's complete 16-byte test frame.
+   - Set **Role** to **ThorSerial Reply** for a passive port that uses that RS232 row's selected baud rate/framing and replies only to ThorSerialV2's complete 16-byte test frame. Use `9600 8N1` and select **485 PC REPLY** on the updated ThorSerialV2 firmware.
    - Set **Role** to **PARO Simulator** to make that port behave like a PARO sensor.
    - Set a **PARO Device ID** from `00` to `99` for each simulated sensor. The PARO/Arduino default serial format is `9600 8N1`.
 3. Configure each RS485 port and name. Assign at least one connected RS232 channel the **RS485 Reply** role for the return path.
@@ -294,13 +294,14 @@ The UPort installer also applies the bundled modern-kernel compatibility patch a
    - Use **Compact View (2 Columns)** to switch to the old compact row layout for 1920x1080 screens
    - Use **Hide Non-Preset Ports** to show only the channel names selected by the last applied preset
    - Top health strip shows alarm state, fault log count, and live totals
-   - Green bar = good message match
-   - Purple bar = communication recovered after prior fault on that channel
-   - Yellow bar = standby/running without pass yet
+   - Green bar = good message match after the channel has completed its five-second startup grace period
+   - Purple bar = communication recovered from a fault that occurred after startup grace completed
+   - Yellow bar = standby/running/startup grace without a qualified pass yet
    - Red bar = wrong message or serial-port error (the row text distinguishes them)
 7. Use **Health** tab to watch global pass/fail totals, total errors, run time, 1-hour fail count, alarm color, and **Faults Logged** count next to the alarm box.
-   - Green = good communication only after at least 1 hour runtime and 0 errors in the last 1 hour
-   - Purple = good communication, but faults are logged (recovered state)
+   - Green = every active channel has qualified as good after its five-second startup grace period
+   - Purple = communication is currently good, but a post-grace fault is recorded in Fault Review
+   - Yellow = active channels are still starting or waiting for a valid message
    - Red = active alarm (current FAIL/ERROR issue)
 8. Use **Fault Review** tab to review channels that were PASS and then changed to FAIL/ERROR.
 9. In **Overview**, use per-row **Start** and **Stop** buttons to control individual RS232/RS485 channels.
@@ -338,6 +339,7 @@ The UPort installer also applies the bundled modern-kernel compatibility patch a
 - Fullscreen default lives in `ui.start_fullscreen`.
 - Auto-start-after-launch default lives in `ui.auto_start_after_launch_2s`.
 - 2-second startup delay default lives in `ui.delay_comm_start_2s`.
+- Every worker uses a separate fixed five-second health grace period before it may show Good; failures during this period are not counted or added to Fault Review.
 - Overview compact mode default lives in `ui.overview_compact_view`.
 - Overview preset filtering default lives in `ui.overview_hide_non_preset_ports`.
 - The last applied preset lives in `ui.active_preset_idx`.

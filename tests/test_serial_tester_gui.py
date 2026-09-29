@@ -2,6 +2,7 @@ import json
 import os
 import queue
 import tempfile
+import time
 import types
 import unittest
 from pathlib import Path
@@ -114,6 +115,9 @@ class OneByteAtATimePort(ScriptedPort):
 
 class StopAfterRs232EchoWorker(app_module.RS232Worker):
     def __init__(self, *args, port, **kwargs):
+        config = args[1].copy()
+        config.setdefault("failure_grace_period_s", 0)
+        args = (args[0], config, *args[2:])
         super().__init__(*args, **kwargs)
         self.port = port
 
@@ -141,6 +145,12 @@ class StopAfterThorRawRxWorker(StopAfterRs232EchoWorker):
 
 
 class StopAfterRs232GraceWorker(StopAfterRs232EchoWorker):
+    def __init__(self, *args, **kwargs):
+        config = args[1].copy()
+        config["failure_grace_period_s"] = app_module.FAILURE_GRACE_PERIOD_SECONDS
+        args = (args[0], config, *args[2:])
+        super().__init__(*args, **kwargs)
+
     def emit(self, status, last, **kwargs):
         app_module.RS232Worker.emit(self, status, last, **kwargs)
         if last.startswith("Grace period:"):
@@ -149,6 +159,9 @@ class StopAfterRs232GraceWorker(StopAfterRs232EchoWorker):
 
 class StopAfterRs485PassWorker(app_module.RS485PairWorker):
     def __init__(self, *args, port, **kwargs):
+        config = args[1].copy()
+        config.setdefault("failure_grace_period_s", 0)
+        args = (args[0], config, *args[2:])
         super().__init__(*args, **kwargs)
         self.port = port
         self.opened_names = []
@@ -164,6 +177,12 @@ class StopAfterRs485PassWorker(app_module.RS485PairWorker):
 
 
 class StopAfterRs485GraceWorker(StopAfterRs485PassWorker):
+    def __init__(self, *args, **kwargs):
+        config = args[1].copy()
+        config["failure_grace_period_s"] = app_module.FAILURE_GRACE_PERIOD_SECONDS
+        args = (args[0], config, *args[2:])
+        super().__init__(*args, **kwargs)
+
     def emit(self, status, last, **kwargs):
         app_module.RS485PairWorker.emit(self, status, last, **kwargs)
         if last.startswith("Grace period:"):
@@ -172,6 +191,9 @@ class StopAfterRs485GraceWorker(StopAfterRs485PassWorker):
 
 class StopAfterParoResponseWorker(app_module.RS232Worker):
     def __init__(self, *args, port, **kwargs):
+        config = args[1].copy()
+        config.setdefault("failure_grace_period_s", 0)
+        args = (args[0], config, *args[2:])
         super().__init__(*args, **kwargs)
         self.port = port
 
@@ -406,6 +428,33 @@ class SerialTesterTests(unittest.TestCase):
                 "-n",
                 app_module.LINUX_FASTCOM_CLOCK_HELPER,
                 "/dev/ttyS4",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    @patch.object(app_module.sys, "platform", "linux")
+    def test_fastcom_clock_programmer_targets_all_cards_automatically(self):
+        completed = types.SimpleNamespace(
+            stdout="Programmed all 3 detected Fastcom PCI-335 cards.\n",
+            stderr="",
+        )
+        with (
+            patch.object(app_module.os.path, "isfile", return_value=True),
+            patch.object(app_module.os, "access", return_value=True),
+            patch.object(app_module.shutil, "which", return_value="/usr/bin/sudo"),
+            patch.object(app_module.subprocess, "run", return_value=completed) as run,
+        ):
+            result = app_module.program_linux_fastcom_clock()
+
+        self.assertIn("all 3 detected", result)
+        run.assert_called_once_with(
+            [
+                "/usr/bin/sudo",
+                "-n",
+                app_module.LINUX_FASTCOM_CLOCK_HELPER,
+                "--all",
             ],
             check=True,
             capture_output=True,
@@ -695,7 +744,7 @@ class SerialTesterTests(unittest.TestCase):
         self.assertEqual(failure["tx_hex"], bytes.fromhex(config["payload_hex"]).hex(" ").upper())
         self.assertEqual(failure["rx_hex"], unexpected.hex(" ").upper())
 
-    def test_rs232_failures_are_ignored_during_two_second_grace_period(self):
+    def test_rs232_failures_are_ignored_during_five_second_grace_period(self):
         events = queue.Queue()
         config = app_module.default_rs232_item(0)
         unexpected = bytes.fromhex("DEADBEEFDEADBEEF")
@@ -707,7 +756,7 @@ class SerialTesterTests(unittest.TestCase):
         self.assertEqual(sum(event["fail_inc"] for event in events.queue), 0)
         self.assertTrue(any("failure ignored" in event["last"] for event in events.queue))
 
-    def test_rs485_failures_are_ignored_during_two_second_grace_period(self):
+    def test_rs485_failures_are_ignored_during_five_second_grace_period(self):
         events = queue.Queue()
         config = app_module.default_rs485_item(0)
         unexpected = bytes.fromhex("DEADBEEFDEADBEEF")
@@ -750,10 +799,41 @@ class SerialTesterTests(unittest.TestCase):
 
     def test_overview_distinguishes_port_errors_from_message_failures(self):
         app = object.__new__(app_module.SerialTesterApp)
-        app.channel_fault_history = set()
 
         self.assertEqual(app._status_to_overview_state("rs232", 0, "ERROR")[1], "Port Error")
         self.assertEqual(app._status_to_overview_state("rs232", 0, "FAIL")[1], "Wrong Message")
+
+    def test_startup_grace_keeps_success_in_standby_without_counting_pass(self):
+        events = queue.Queue()
+        worker = app_module.RS232Worker(
+            0,
+            app_module.default_rs232_item(0),
+            events,
+            worker_id=21,
+        )
+        worker.good_grace_deadline = time.monotonic() + 5.0
+
+        worker.emit("PASS", "TX/RX valid", pass_inc=1, tx_hex="55", rx_hex="55")
+
+        event = events.get_nowait()
+        self.assertEqual(event["status"], "Running")
+        self.assertEqual(event["pass_inc"], 0)
+        self.assertIn("Startup grace", event["last"])
+        self.assertEqual(event["tx_hex"], "55")
+        self.assertEqual(event["rx_hex"], "55")
+
+    def test_recovered_state_is_available_after_startup_grace(self):
+        app = object.__new__(app_module.SerialTesterApp)
+        app.channel_fault_history = set()
+
+        color, label = app._status_to_overview_state("rs232", 0, "PASS")
+        self.assertEqual(color, "#22C55E")
+        self.assertEqual(label, "Good")
+
+        app.channel_fault_history.add(("rs232", 0))
+        color, label = app._status_to_overview_state("rs232", 0, "PASS")
+        self.assertEqual(color, "#8B5CF6")
+        self.assertEqual(label, "Recovered")
 
     def test_stop_during_read_does_not_record_failure(self):
         events = queue.Queue()
