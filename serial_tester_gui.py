@@ -1663,6 +1663,7 @@ class SerialTesterApp(tk.Tk):
         self.channel_fault_history: set[tuple[str, int]] = set()
         self.launch_autostart_scheduled = False
         self.app_start_monotonic = time.monotonic()
+        self.health_all_good_since: float | None = None
         self.preset_name_vars: list[tk.StringVar] = []
         self.preset_panels: list[ttk.LabelFrame] = []
         self.preset_name_listboxes: list[tk.Listbox] = []
@@ -1688,6 +1689,7 @@ class SerialTesterApp(tk.Tk):
         self.health_active_workers_var = tk.StringVar(value="Active Workers: 0")
         self.health_recent_fail_var = tk.StringVar(value=f"Fails Last {FAILURE_WINDOW_LABEL}: 0")
         self.health_runtime_var = tk.StringVar(value="Run Time: 00:00:00")
+        self.health_all_good_var = tk.StringVar(value="1h All-Green Meter: 00:00:00 / 01:00:00")
         self.health_fault_review_count_var = tk.StringVar(value="Faults Logged: 0")
         self.health_alarm_status_var = tk.StringVar(value="STANDBY")
         self.health_alarm_canvas: tk.Canvas | None = None
@@ -2322,6 +2324,9 @@ class SerialTesterApp(tk.Tk):
         ttk.Label(summary, textvariable=self.health_active_workers_var).grid(row=1, column=0, sticky="w", pady=(2, 0))
         ttk.Label(summary, textvariable=self.health_recent_fail_var).grid(row=1, column=1, sticky="w", pady=(2, 0))
         ttk.Label(summary, textvariable=self.health_runtime_var).grid(row=1, column=2, sticky="w", pady=(2, 0))
+        ttk.Label(summary, textvariable=self.health_all_good_var, font=("Segoe UI", 10, "bold")).grid(
+            row=2, column=0, columnspan=3, sticky="w", pady=(4, 0)
+        )
 
         alarm_and_issues = ttk.Panedwindow(parent, orient=tk.HORIZONTAL)
         alarm_and_issues.grid(row=1, column=0, sticky="nsew")
@@ -2414,6 +2419,7 @@ class SerialTesterApp(tk.Tk):
 
     def clear_fault_review(self) -> None:
         self.fault_records.clear()
+        self.failure_counts.clear()
         self.fault_tree.delete(*self.fault_tree.get_children())
         self.channel_fault_history.clear()
         self._refresh_health_panel()
@@ -2464,6 +2470,7 @@ class SerialTesterApp(tk.Tk):
             self.fault_tree.insert("", tk.END, values=record)
 
     def _record_failure_event(self) -> None:
+        self.health_all_good_since = None
         now_sec = int(time.time())
         if self.failure_counts and self.failure_counts[-1][0] == now_sec:
             sec, count = self.failure_counts[-1]
@@ -2481,6 +2488,27 @@ class SerialTesterApp(tk.Tk):
     def _recent_failure_count(self) -> int:
         self._trim_failure_counts()
         return sum(count for _sec, count in self.failure_counts)
+
+    def _all_active_channels_good(self) -> bool:
+        active_workers = len(self.rs232_workers) + len(self.rs485_workers)
+        active_states = [self.rs232_state[idx] for idx in self.rs232_workers if idx < len(self.rs232_state)]
+        active_states.extend(
+            self.rs485_state[idx] for idx in self.rs485_workers if idx < len(self.rs485_state)
+        )
+        return len(active_states) == active_workers and active_workers > 0 and all(
+            state["status"] == "PASS" for state in active_states
+        )
+
+    def _update_all_good_timer(self, now: float | None = None) -> float:
+        current = time.monotonic() if now is None else now
+        if not self._all_active_channels_good():
+            self.health_all_good_since = None
+            return 0.0
+        started = self.__dict__.get("health_all_good_since")
+        if started is None:
+            self.health_all_good_since = current
+            return 0.0
+        return max(current - started, 0.0)
 
     def _refresh_health_panel(self, include_issue_tree: bool = True) -> None:
         total_pass = sum(item["pass_count"] for item in self.rs232_state) + sum(item["pass_count"] for item in self.rs485_state)
@@ -2513,23 +2541,26 @@ class SerialTesterApp(tk.Tk):
                     ("RS485", cfg["name"], cfg["sender_port"], state["status"], state["last"])
                 )
 
-        active_states = [self.rs232_state[idx] for idx in self.rs232_workers if idx < len(self.rs232_state)]
-        active_states.extend(
-            self.rs485_state[idx] for idx in self.rs485_workers if idx < len(self.rs485_state)
-        )
-        all_active_channels_good = len(active_states) == active_workers and active_workers > 0 and all(
-            state["status"] == "PASS" for state in active_states
+        all_active_channels_good = self._all_active_channels_good()
+        all_good_seconds = self._update_all_good_timer()
+        one_hour_all_good = all_active_channels_good and all_good_seconds >= FAILURE_WINDOW_SECONDS
+        meter_seconds = min(all_good_seconds, float(FAILURE_WINDOW_SECONDS))
+        self.health_all_good_var.set(
+            f"1h All-Green Meter: {self._format_duration(meter_seconds)} / 01:00:00"
         )
 
         if current_issues:
             alarm_text = "ALARM"
             alarm_color = "#DC2626"
-        elif active_workers > 0 and self.fault_records:
+        elif active_workers > 0 and one_hour_all_good:
+            alarm_text = "GOOD"
+            alarm_color = "#22C55E"
+        elif active_workers > 0 and all_active_channels_good and self.fault_records:
             alarm_text = "RECOVERED"
             alarm_color = "#8B5CF6"
         elif active_workers > 0 and all_active_channels_good:
-            alarm_text = "GOOD"
-            alarm_color = "#22C55E"
+            alarm_text = "QUALIFYING"
+            alarm_color = "#F0B429"
         else:
             alarm_text = "STANDBY"
             alarm_color = "#9CA3AF"
@@ -2660,6 +2691,11 @@ class SerialTesterApp(tk.Tk):
             textvariable=self.health_fault_review_count_var,
             font=("Segoe UI", 10, "bold"),
         ).grid(row=0, column=2, sticky="w", padx=(10, 0))
+        ttk.Label(
+            status_row,
+            textvariable=self.health_all_good_var,
+            font=("Segoe UI", 10, "bold"),
+        ).grid(row=0, column=3, sticky="w", padx=(10, 0))
 
         ttk.Label(health, textvariable=self.health_total_pass_var).grid(row=1, column=0, sticky="w")
         ttk.Label(health, textvariable=self.health_total_fail_var).grid(row=1, column=1, sticky="w")
@@ -4439,6 +4475,7 @@ class SerialTesterApp(tk.Tk):
         log_event: bool = True,
         refresh_health: bool = True,
     ) -> None:
+        self.health_all_good_since = None
         delay = self._resolved_startup_delay(startup_delay_s)
 
         if group == "rs232":
@@ -4560,6 +4597,7 @@ class SerialTesterApp(tk.Tk):
             self._refresh_health_panel()
 
     def stop_single_test(self, group: str, idx: int, log_event: bool = True, refresh_health: bool = True) -> None:
+        self.health_all_good_since = None
         if group == "rs232":
             worker = self.rs232_workers.pop(idx, None)
             if worker is not None:
@@ -4771,6 +4809,7 @@ class SerialTesterApp(tk.Tk):
                     self._append_worker_event_log("rs232", idx, status, last)
                 if status == "Stopped":
                     self.rs232_workers.pop(idx, None)
+                self._update_all_good_timer()
 
             if group == "rs485" and 0 <= idx < len(self.rs485_state):
                 current_worker = self.rs485_workers.get(idx)
@@ -4797,6 +4836,7 @@ class SerialTesterApp(tk.Tk):
                     self._append_worker_event_log("rs485", idx, status, last)
                 if status == "Stopped":
                     self.rs485_workers.pop(idx, None)
+                self._update_all_good_timer()
 
         delay_ms = WORKER_EVENT_POLL_MS if self.window_motion_active or processed_count < event_limit else 1
         self.after(delay_ms, self._process_worker_events)

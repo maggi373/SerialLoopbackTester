@@ -299,11 +299,13 @@ The UPort installer also applies the bundled modern-kernel compatibility patch a
    - Yellow bar = standby/running/startup grace without a qualified pass yet
    - Red bar = wrong message or serial-port error (the row text distinguishes them)
 7. Use **Health** tab to watch global pass/fail totals, total errors, run time, 1-hour fail count, alarm color, and **Faults Logged** count next to the alarm box.
-   - Green = every active channel has qualified as good after its five-second startup grace period
-   - Purple = communication is currently good, but a post-grace fault is recorded in Fault Review
-   - Yellow = active channels are still starting or waiting for a valid message
+   - Green = every active communication channel has remained green continuously for one full hour
+   - Purple = every active channel is currently good, but a post-grace fault is recorded and the new one-hour all-green qualification is not complete
+   - Yellow = channels are starting, waiting for a valid message, or qualifying for the one-hour all-green requirement
    - Red = active alarm (current FAIL/ERROR issue)
+   - Starting, stopping, or restarting any test resets the one-hour all-green timer. Any later FAIL/ERROR also resets it.
 8. Use **Fault Review** tab to review channels that were PASS and then changed to FAIL/ERROR.
+   - **Clear Fault Review** also clears the **Fails Last 1h** counter. It does not advance the one-hour all-green health meter.
 9. In **Overview**, use per-row **Start** and **Stop** buttons to control individual RS232/RS485 channels.
 10. In **Settings > Application**, enable/disable **Auto-start tests 2 seconds after launch** (default ON).
 11. In **Settings > Application**, enable **Start application in fullscreen** if desired.

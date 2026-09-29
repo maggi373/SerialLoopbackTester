@@ -835,6 +835,39 @@ class SerialTesterTests(unittest.TestCase):
         self.assertEqual(color, "#8B5CF6")
         self.assertEqual(label, "Recovered")
 
+    def test_one_hour_health_meter_requires_continuous_green_on_all_active_channels(self):
+        app = object.__new__(app_module.SerialTesterApp)
+        app.rs232_workers = {0: types.SimpleNamespace()}
+        app.rs485_workers = {0: types.SimpleNamespace()}
+        app.rs232_state = [{"status": "PASS"}]
+        app.rs485_state = [{"status": "PASS"}]
+        app.health_all_good_since = None
+
+        self.assertEqual(app._update_all_good_timer(now=100.0), 0.0)
+        self.assertEqual(app._update_all_good_timer(now=3699.0), 3599.0)
+        self.assertEqual(app._update_all_good_timer(now=3700.0), 3600.0)
+
+        app.rs485_state[0]["status"] = "FAIL"
+        self.assertEqual(app._update_all_good_timer(now=3701.0), 0.0)
+        self.assertIsNone(app.health_all_good_since)
+
+    def test_clear_fault_review_also_clears_last_hour_failure_counter(self):
+        app = object.__new__(app_module.SerialTesterApp)
+        app.fault_records = app_module.deque([("fault",)])
+        app.failure_counts = app_module.deque([(123, 4)])
+        app.channel_fault_history = {("rs232", 0)}
+        app.fault_tree = types.SimpleNamespace(get_children=lambda: (), delete=lambda *_args: None)
+        app.rs232_configs = []
+        app.rs485_configs = []
+        app._refresh_health_panel = lambda: None
+        app.append_log = lambda _message: None
+
+        app.clear_fault_review()
+
+        self.assertEqual(list(app.fault_records), [])
+        self.assertEqual(list(app.failure_counts), [])
+        self.assertEqual(app.channel_fault_history, set())
+
     def test_stop_during_read_does_not_record_failure(self):
         events = queue.Queue()
         worker = StopDuringReadWorker(
